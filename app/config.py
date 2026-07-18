@@ -69,7 +69,7 @@ CLICK_METHODS = ("cursor",)
 @dataclass
 class AppConfig:
     threshold: float = 0.85
-    scan_interval: float = 0.03
+    scan_interval: float = 1.0 / 30.0  # target ~30 FPS
     confirm_wait: float = 0.5
     confirm_grace: float = 3.0
     # After Skip is detected, wait before clicking
