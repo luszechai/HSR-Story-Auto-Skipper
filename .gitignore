@@ -1,0 +1,20 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+config.json
+*.egg-info/
+dist/
+build/
+.idea/
+.vscode/
+*.log
+*.spec.bak
+assets/blacklist/fp_*.png
+assets/blacklist/index.json
+assets/reinforce/**/*.png
+assets/reinforce/index.json
+# local launcher helpers / OS junk
+Thumbs.db
+Desktop.ini
