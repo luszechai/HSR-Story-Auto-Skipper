@@ -52,7 +52,7 @@ class SettingsPage(ctk.CTkFrame):
     def load_from_config(self, config: AppConfig) -> None:
         self.config_data = config
         self.threshold_var.set(self._snap(config.threshold, 0.50, 0.99, 0.01))
-        self.fps_var.set(self._snap(self._interval_to_fps(config.scan_interval), 10, 100, 10))
+        self.fps_var.set(self._snap(self._interval_to_fps(config.scan_interval), 1, 30, 1))
         self.wait_var.set(self._snap(config.confirm_wait, 0.1, 2.0, 0.1))
         self.skip_delay_var.set(
             self._snap(float(getattr(config, "skip_click_delay", 0.1)), 0.0, 1.0, 0.1)
@@ -138,7 +138,7 @@ class SettingsPage(ctk.CTkFrame):
             value=self._snap(cfg.threshold, 0.50, 0.99, 0.01)
         )
         self.fps_var = ctk.DoubleVar(
-            value=self._snap(self._interval_to_fps(cfg.scan_interval), 10, 100, 10)
+            value=self._snap(self._interval_to_fps(cfg.scan_interval), 1, 30, 1)
         )
         self.wait_var = ctk.DoubleVar(value=self._snap(cfg.confirm_wait, 0.1, 2.0, 0.1))
         self.skip_delay_var = ctk.DoubleVar(
@@ -194,7 +194,7 @@ class SettingsPage(ctk.CTkFrame):
     def _build_form(self, parent) -> None:
         detect = self._section(parent, "偵測", "數值以固定間隔跳動（例如 FPS 每次 ±10）")
         self._slider(detect, "比對閾值", self.threshold_var, 0.50, 0.99, step=0.01)
-        self._slider(detect, "偵測目標 FPS", self.fps_var, 10, 100, step=10, fmt_int=True)
+        self._slider(detect, "偵測目標 FPS", self.fps_var, 1, 30, step=1, fmt_int=True)
         self._slider(
             detect, "偵測 Skip 後點擊前等待（秒）", self.skip_delay_var, 0.0, 1.0, step=0.1
         )
@@ -358,11 +358,11 @@ class SettingsPage(ctk.CTkFrame):
 
     @staticmethod
     def _interval_to_fps(interval: float) -> float:
-        return max(10.0, min(100.0, round(1.0 / max(0.01, float(interval)))))
+        return max(1.0, min(30.0, round(1.0 / max(0.01, float(interval)))))
 
     @staticmethod
     def _fps_to_interval(fps: float) -> float:
-        return 1.0 / max(10.0, min(100.0, float(fps)))
+        return 1.0 / max(1.0, min(30.0, float(fps)))
 
     def _collect(self) -> AppConfig:
         cfg = self.config_data
