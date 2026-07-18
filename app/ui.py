@@ -114,7 +114,7 @@ class App(ctk.CTk):
         root.pack(fill="both", expand=True, padx=18, pady=16)
         root.grid_columnconfigure(1, weight=1)
         root.grid_rowconfigure(0, weight=1)
-        self._root = root
+        self._layout = root
 
         self._build_sidebar(root)
 
