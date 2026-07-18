@@ -121,4 +121,5 @@ class AppConfig:
         cfg.expected_height = max(240, int(cfg.expected_height))
         cfg.reinforce_max = max(0, min(500, int(cfg.reinforce_max)))
         cfg.skip_click_delay = max(0.0, float(getattr(cfg, "skip_click_delay", 0.1)))
+        cfg.scan_interval = max(0.01, float(cfg.scan_interval))
         return cfg

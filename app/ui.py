@@ -15,7 +15,7 @@ from app.detector import TemplateDetector
 from app.blacklist import SkipBlacklist
 from app.overlay import FloatingOverlay
 from app.reinforce import ReinforceStore
-from app.settings_dialog import SettingsDialog
+from app.settings_dialog import SettingsPage
 from app.template_capture import TemplateCaptureDialog
 from app.worker import AutoSkipWorker, WorkerState, WorkerStatus
 
@@ -114,10 +114,32 @@ class App(ctk.CTk):
         root.pack(fill="both", expand=True, padx=18, pady=16)
         root.grid_columnconfigure(1, weight=1)
         root.grid_rowconfigure(0, weight=1)
+        self._root = root
 
         self._build_sidebar(root)
-        self._build_preview(root)
-        self._build_controls(root)
+
+        self.page_host = ctk.CTkFrame(root, fg_color="transparent")
+        self.page_host.grid(row=0, column=1, sticky="nsew")
+        self.page_host.grid_columnconfigure(0, weight=1)
+        self.page_host.grid_rowconfigure(0, weight=1)
+
+        self.home_page = ctk.CTkFrame(self.page_host, fg_color="transparent")
+        self.home_page.grid(row=0, column=0, sticky="nsew")
+        self.home_page.grid_columnconfigure(0, weight=1)
+        self.home_page.grid_columnconfigure(1, weight=0)
+        self.home_page.grid_rowconfigure(0, weight=1)
+
+        self._build_preview(self.home_page)
+        self._build_controls(self.home_page)
+
+        self.settings_page = SettingsPage(
+            self.page_host,
+            self.config_data,
+            on_apply=self._on_settings_applied,
+            on_back=self._show_home,
+        )
+        self.settings_page.grid(row=0, column=0, sticky="nsew")
+        self._show_home()
 
     def _build_sidebar(self, parent) -> None:
         side = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=16, width=240)
@@ -256,7 +278,7 @@ class App(ctk.CTk):
 
     def _build_preview(self, parent) -> None:
         mid = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=16)
-        mid.grid(row=0, column=1, sticky="nsew")
+        mid.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
         mid.grid_rowconfigure(1, weight=1)
         mid.grid_columnconfigure(0, weight=1)
 
@@ -287,7 +309,7 @@ class App(ctk.CTk):
 
     def _build_controls(self, parent) -> None:
         right = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=16, width=280)
-        right.grid(row=0, column=2, sticky="nse", padx=(12, 0))
+        right.grid(row=0, column=1, sticky="nse")
         right.grid_propagate(False)
 
         ctk.CTkLabel(
@@ -447,7 +469,7 @@ class App(ctk.CTk):
         self.settings_summary.configure(
             text=(
                 f"解析度 {cfg.resolution_label()}\n"
-                f"閾值 {cfg.threshold:.2f} · 間隔 {cfg.scan_interval:.2f}s\n"
+                f"閾值 {cfg.threshold:.2f} · 目標 {max(1, int(round(1.0 / max(0.01, cfg.scan_interval))))} FPS\n"
                 f"Skip 點擊前 {getattr(cfg, 'skip_click_delay', 0.1):.2f}s\n"
                 f"確認等待 {cfg.confirm_wait:.2f}s\n"
                 f"語系：{langs}"
@@ -492,8 +514,17 @@ class App(ctk.CTk):
     def _on_overlay_closed(self) -> None:
         self._overlay = None
 
+    def _show_home(self) -> None:
+        self.settings_page.grid_remove()
+        self.home_page.grid()
+
+    def _show_settings(self) -> None:
+        self.settings_page.load_from_config(self.config_data)
+        self.home_page.grid_remove()
+        self.settings_page.grid()
+
     def _open_settings(self) -> None:
-        SettingsDialog(self, self.config_data, on_apply=self._on_settings_applied)
+        self._show_settings()
 
     def _on_settings_applied(self, cfg: AppConfig) -> None:
         self.config_data = cfg
