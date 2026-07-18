@@ -54,6 +54,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon="assets/brand/app.ico",
+    uac_admin=True,  # always prompt: Run as administrator
 )
 
 coll = COLLECT(
