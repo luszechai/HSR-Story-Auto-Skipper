@@ -6,6 +6,7 @@ __pycache__/
 config.json
 *.egg-info/
 dist/
+dist_fresh/
 build/
 .idea/
 .vscode/
@@ -15,6 +16,8 @@ assets/blacklist/fp_*.png
 assets/blacklist/index.json
 assets/reinforce/**/*.png
 assets/reinforce/index.json
+_ana_*.png
+_now_*.png
 # local launcher helpers / OS junk
 Thumbs.db
 Desktop.ini

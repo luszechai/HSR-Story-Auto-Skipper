@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
+import cv2
 import customtkinter as ctk
+import numpy as np
 
 from app.config import LANGS, RESOLUTION_PRESETS, AppConfig
+from app.window_capture import capture_client, find_game_window
 
 BG = "#080a10"
 PANEL = "#10141e"
@@ -55,16 +58,18 @@ class SettingsPage(ctk.CTkFrame):
         self.fps_var.set(self._snap(self._interval_to_fps(config.scan_interval), 1, 30, 1))
         self.wait_var.set(self._snap(config.confirm_wait, 0.1, 2.0, 0.1))
         self.skip_delay_var.set(
-            self._snap(float(getattr(config, "skip_click_delay", 0.1)), 0.0, 1.0, 0.1)
+            self._snap(float(getattr(config, "skip_click_delay", 0.3)), 0.0, 1.0, 0.1)
         )
         self.grace_var.set(self._snap(config.confirm_grace, 1.0, 8.0, 0.5))
         self.scale_var.set(config.scale_match)
-        self.reinforce_var.set(getattr(config, "reinforce_enabled", True))
         self.confirm_text_var.set(getattr(config, "confirm_require_text", True))
-        self.reinforce_max_var.set(
-            self._snap(float(getattr(config, "reinforce_max", 50)), 10, 200, 10)
-        )
         self.normalize_var.set(config.normalize_resolution)
+        self.skip_fixed_var.set(getattr(config, "skip_fixed", True))
+        self.skip_presence_var.set(
+            getattr(config, "skip_fixed_require_presence", True)
+        )
+        self.skip_rel_x_var.set(f"{float(getattr(config, 'skip_rel_x', 0.82125)):.5f}")
+        self.skip_rel_y_var.set(f"{float(getattr(config, 'skip_rel_y', 0.055556)):.5f}")
         self._set_res(config.expected_width, config.expected_height)
         self.hotkey_start_var.set(config.hotkey_start)
         self.hotkey_stop_var.set(config.hotkey_stop)
@@ -142,20 +147,24 @@ class SettingsPage(ctk.CTkFrame):
         )
         self.wait_var = ctk.DoubleVar(value=self._snap(cfg.confirm_wait, 0.1, 2.0, 0.1))
         self.skip_delay_var = ctk.DoubleVar(
-            value=self._snap(float(getattr(cfg, "skip_click_delay", 0.1)), 0.0, 1.0, 0.1)
+            value=self._snap(float(getattr(cfg, "skip_click_delay", 0.3)), 0.0, 1.0, 0.1)
         )
         self.grace_var = ctk.DoubleVar(value=self._snap(cfg.confirm_grace, 1.0, 8.0, 0.5))
         self.scale_var = ctk.BooleanVar(value=cfg.scale_match)
-        self.reinforce_var = ctk.BooleanVar(
-            value=getattr(cfg, "reinforce_enabled", True)
-        )
         self.confirm_text_var = ctk.BooleanVar(
             value=getattr(cfg, "confirm_require_text", True)
         )
-        self.reinforce_max_var = ctk.DoubleVar(
-            value=self._snap(float(getattr(cfg, "reinforce_max", 50)), 10, 200, 10)
-        )
         self.normalize_var = ctk.BooleanVar(value=cfg.normalize_resolution)
+        self.skip_fixed_var = ctk.BooleanVar(value=getattr(cfg, "skip_fixed", True))
+        self.skip_presence_var = ctk.BooleanVar(
+            value=getattr(cfg, "skip_fixed_require_presence", True)
+        )
+        self.skip_rel_x_var = ctk.StringVar(
+            value=f"{float(getattr(cfg, 'skip_rel_x', 0.82125)):.5f}"
+        )
+        self.skip_rel_y_var = ctk.StringVar(
+            value=f"{float(getattr(cfg, 'skip_rel_y', 0.055556)):.5f}"
+        )
         self.width_var = ctk.StringVar(value=str(cfg.expected_width))
         self.height_var = ctk.StringVar(value=str(cfg.expected_height))
         matched = next(
@@ -200,14 +209,51 @@ class SettingsPage(ctk.CTkFrame):
         )
         self._slider(detect, "Skip 後等待確認（秒）", self.wait_var, 0.1, 2.0, step=0.1)
         self._slider(detect, "確認逾時放棄（秒）", self.grace_var, 1.0, 8.0, step=0.5)
-        self._slider(
-            detect, "強化模板上限", self.reinforce_max_var, 10, 200, step=10, fmt_int=True
-        )
         self._checkbox(detect, "多比例縮放比對（視窗略有縮放時較穩）", self.scale_var)
-        self._checkbox(detect, "成功 Skip→確認 時自動記錄強化模板", self.reinforce_var)
         self._checkbox(
             detect, "確認按鈕必須偵測到「確認」文字才點擊", self.confirm_text_var
         )
+
+        fixed = self._section(
+            parent,
+            "Skip 固定座標",
+            "Skip 在客戶區位置固定時建議開啟（不依賴模板／背景）",
+        )
+        self._checkbox(fixed, "使用固定座標點擊 Skip", self.skip_fixed_var)
+        self._checkbox(
+            fixed,
+            "固定座標仍需確認 Skip 圖示存在（避免探索 HUD 誤點）",
+            self.skip_presence_var,
+        )
+        row_f = ctk.CTkFrame(fixed, fg_color="transparent")
+        row_f.pack(anchor="w", padx=14, pady=(4, 4))
+        ctk.CTkLabel(row_f, text="相對 X", text_color=MUTED).pack(side="left")
+        ctk.CTkEntry(
+            row_f, textvariable=self.skip_rel_x_var, width=90, fg_color="#1c2233"
+        ).pack(side="left", padx=(6, 16))
+        ctk.CTkLabel(row_f, text="相對 Y", text_color=MUTED).pack(side="left")
+        ctk.CTkEntry(
+            row_f, textvariable=self.skip_rel_y_var, width=90, fg_color="#1c2233"
+        ).pack(side="left", padx=(6, 0))
+        self.skip_fixed_hint = ctk.CTkLabel(
+            fixed,
+            text=self._fixed_coord_hint(),
+            text_color=MUTED,
+            anchor="w",
+            justify="left",
+        )
+        self.skip_fixed_hint.pack(fill="x", padx=14, pady=(2, 6))
+        ctk.CTkButton(
+            fixed,
+            text="從遊戲視窗重新定位 Skip",
+            width=200,
+            fg_color=ACCENT_DIM,
+            hover_color="#226655",
+            text_color=ACCENT,
+            border_width=1,
+            border_color=ACCENT,
+            command=self._locate_skip,
+        ).pack(anchor="w", padx=14, pady=(4, 12))
 
         res = self._section(parent, "解析度", "請與遊戲視窗設定一致，並在此解析度下擷取模板")
         values = [p[0] for p in RESOLUTION_PRESETS] + ["自訂"]
@@ -248,7 +294,7 @@ class SettingsPage(ctk.CTkFrame):
             command=lambda: self._set_res(1600, 900),
         ).pack(anchor="w", padx=14, pady=(10, 12))
 
-        hotkey = self._section(parent, "熱鍵", "變更後需重新啟動程式才會生效")
+        hotkey = self._section(parent, "熱鍵", "套用設定後立即生效")
         hk = ctk.CTkFrame(hotkey, fg_color="transparent")
         hk.pack(anchor="w", padx=14, pady=(4, 12))
         ctk.CTkLabel(hk, text="開始", text_color=MUTED, width=40).grid(
@@ -372,11 +418,7 @@ class SettingsPage(ctk.CTkFrame):
         cfg.skip_click_delay = float(self.skip_delay_var.get())
         cfg.confirm_grace = float(self.grace_var.get())
         cfg.scale_match = bool(self.scale_var.get())
-        cfg.reinforce_enabled = bool(self.reinforce_var.get())
         cfg.confirm_require_text = bool(self.confirm_text_var.get())
-        cfg.reinforce_max = max(
-            0, min(500, int(round(float(self.reinforce_max_var.get()))))
-        )
         cfg.normalize_resolution = bool(self.normalize_var.get())
         try:
             cfg.expected_width = max(320, int(self.width_var.get().strip()))
@@ -387,9 +429,88 @@ class SettingsPage(ctk.CTkFrame):
         cfg.click_method = "cursor"
         cfg.hotkey_start = self.hotkey_start_var.get().strip().lower() or "f6"
         cfg.hotkey_stop = self.hotkey_stop_var.get().strip().lower() or "f7"
+        cfg.skip_fixed = bool(self.skip_fixed_var.get())
+        cfg.skip_fixed_require_presence = bool(self.skip_presence_var.get())
+        try:
+            cfg.skip_rel_x = float(min(0.99, max(0.01, float(self.skip_rel_x_var.get()))))
+            cfg.skip_rel_y = float(min(0.99, max(0.01, float(self.skip_rel_y_var.get()))))
+        except ValueError:
+            cfg.skip_rel_x = 0.82125
+            cfg.skip_rel_y = 0.055556
         langs = [lang for lang, var in self.lang_vars.items() if var.get()]
         cfg.enabled_langs = langs or list(LANGS)
         return cfg
+
+    def _fixed_coord_hint(self) -> str:
+        try:
+            rx = float(self.skip_rel_x_var.get())
+            ry = float(self.skip_rel_y_var.get())
+            w = int(self.width_var.get() or 1600)
+            h = int(self.height_var.get() or 900)
+            return f"約等於客戶區像素 ({int(round(w * rx))}, {int(round(h * ry))}) @ {w}×{h}"
+        except ValueError:
+            return "請輸入 0～1 的相對座標"
+
+    def _locate_skip(self) -> None:
+        """Capture game client and set Skip to the left icon of the top-right bar."""
+        info = find_game_window(self.config_data.window_keywords)
+        if info is None:
+            self.skip_fixed_hint.configure(
+                text="找不到遊戲視窗，請先以視窗模式開啟遊戲", text_color="#f85149"
+            )
+            return
+        try:
+            frame = capture_client(info).frame
+        except Exception as exc:
+            self.skip_fixed_hint.configure(
+                text=f"截圖失敗：{exc}", text_color="#f85149"
+            )
+            return
+        fh, fw = frame.shape[:2]
+        # Known layout: Skip is leftmost of the three top-right icons.
+        x0 = int(fw * 0.75)
+        y1 = int(fh * 0.12)
+        band = frame[0:y1, x0:fw]
+        gray = cv2.cvtColor(band, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (7, 7), 0)
+        diff = np.clip(gray.astype(np.int16) - blur.astype(np.int16), 0, 255).astype(
+            np.uint8
+        )
+        mask = ((diff >= 8) & (gray >= 125)).astype(np.uint8) * 255
+        n, _labels, stats, cents = cv2.connectedComponentsWithStats(mask, 8)
+        cands = []
+        for i in range(1, n):
+            x, _y, bw, bh, area = stats[i]
+            if area < 20 or area > 800:
+                continue
+            if bh < 6 or bw < 4:
+                continue
+            cands.append((x, float(cents[i][0]), float(cents[i][1])))
+        if not cands:
+            rx, ry = 0.82125, 0.055556
+            self.skip_fixed_var.set(True)
+            self.skip_rel_x_var.set(f"{rx:.5f}")
+            self.skip_rel_y_var.set(f"{ry:.5f}")
+            self.skip_fixed_hint.configure(
+                text="自動定位失敗，已套用預設相對座標（請確認 Skip 可見）",
+                text_color="#f0883e",
+            )
+            return
+        cands.sort(key=lambda t: t[0])
+        _x, lcx, lcy = cands[0]
+        cx = x0 + int(round(lcx))
+        cy = int(round(lcy))
+        rx = cx / fw
+        ry = cy / fh
+        self.skip_fixed_var.set(True)
+        self.skip_rel_x_var.set(f"{rx:.5f}")
+        self.skip_rel_y_var.set(f"{ry:.5f}")
+        self.width_var.set(str(fw))
+        self.height_var.set(str(fh))
+        self.skip_fixed_hint.configure(
+            text=f"已定位 Skip 中心 ({cx}, {cy}) @ {fw}×{fh} → 相對 ({rx:.5f}, {ry:.5f})",
+            text_color=ACCENT,
+        )
 
     def _apply(self) -> None:
         cfg = self._collect()
@@ -410,15 +531,18 @@ class SettingsPage(ctk.CTkFrame):
         self.skip_delay_var.set(self._snap(defaults.skip_click_delay, 0.0, 1.0, 0.1))
         self.grace_var.set(self._snap(defaults.confirm_grace, 1.0, 8.0, 0.5))
         self.scale_var.set(defaults.scale_match)
-        self.reinforce_var.set(defaults.reinforce_enabled)
         self.confirm_text_var.set(defaults.confirm_require_text)
-        self.reinforce_max_var.set(50)
         self.normalize_var.set(defaults.normalize_resolution)
+        self.skip_fixed_var.set(defaults.skip_fixed)
+        self.skip_presence_var.set(defaults.skip_fixed_require_presence)
+        self.skip_rel_x_var.set(f"{defaults.skip_rel_x:.5f}")
+        self.skip_rel_y_var.set(f"{defaults.skip_rel_y:.5f}")
         self._set_res(defaults.expected_width, defaults.expected_height)
         self.hotkey_start_var.set(defaults.hotkey_start)
         self.hotkey_stop_var.set(defaults.hotkey_stop)
         for lang, var in self.lang_vars.items():
             var.set(lang in defaults.enabled_langs)
+        self.skip_fixed_hint.configure(text=self._fixed_coord_hint(), text_color=MUTED)
 
 
 SettingsDialog = SettingsPage

@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
+import copy
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Optional
+from typing import Callable, Deque, Optional
 
 import cv2
 import numpy as np
 
 from app import clicker
-from app.blacklist import SkipBlacklist
 from app.config import AppConfig
 from app.detector import MatchResult, TemplateDetector
-from app.reinforce import ReinforceStore
 from app.window_capture import (
     ScreenCapturer,
     WindowInfo,
@@ -31,7 +31,6 @@ class WorkerState(str, Enum):
     WAITING_CONFIRM = "waiting_confirm"
     CLICKED_SKIP = "clicked_skip"
     CLICKED_CONFIRM = "clicked_confirm"
-    AVOIDED = "avoided"
     ERROR = "error"
 
 
@@ -46,15 +45,124 @@ class WorkerStatus:
     preview_bgr: Optional[np.ndarray] = None
     skip_count: int = 0
     confirm_count: int = 0
-    avoid_count: int = 0
-    blacklist_size: int = 0
-    reinforce_size: int = 0
-    reinforce_max: int = 50
     detect_fps: float = 0.0
     client_size: str = ""
 
 
 StatusCallback = Callable[[WorkerStatus], None]
+
+
+class MatchConsensus:
+    """Require spatially stable detections within a rolling frame window."""
+
+    def __init__(self) -> None:
+        self._samples: Deque[Optional[MatchResult]] = deque()
+        self._window = 0
+
+    def observe(
+        self,
+        match: MatchResult,
+        *,
+        required: int,
+        window: int,
+    ) -> tuple[bool, int]:
+        window = max(1, int(window))
+        required = min(window, max(1, int(required)))
+        if window != self._window:
+            self._samples = deque(self._samples, maxlen=window)
+            self._window = window
+        self._samples.append(match if match.found else None)
+
+        positives = [sample for sample in self._samples if sample is not None]
+        if not positives:
+            return False, 0
+        latest = positives[-1]
+        tolerance = max(4.0, max(latest.w, latest.h) * 0.4)
+        lx, ly = latest.center
+        stable = [
+            sample
+            for sample in positives
+            if abs(sample.center[0] - lx) <= tolerance
+            and abs(sample.center[1] - ly) <= tolerance
+        ]
+        count = len(stable)
+        if count >= required:
+            self.reset()
+            return True, count
+        return False, count
+
+    def reset(self) -> None:
+        self._samples.clear()
+
+
+class PostClickVerifier:
+    """Track whether Skip remains absent for consecutive frames."""
+
+    def __init__(self) -> None:
+        self._missing_frames = 0
+        self.disappeared = False
+
+    def observe(self, *, skip_found: bool, required_misses: int) -> bool:
+        if skip_found:
+            self.reset()
+            return False
+        self._missing_frames += 1
+        if self._missing_frames >= max(1, int(required_misses)):
+            self.disappeared = True
+        return self.disappeared
+
+    def reset(self) -> None:
+        self._missing_frames = 0
+        self.disappeared = False
+
+
+class ConfirmClickTracker:
+    """Verify Confirm disappears and bound repeated click attempts."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+        self._missing_frames = 0
+        self.retry_at = 0.0
+
+    @property
+    def awaiting_dismissal(self) -> bool:
+        return self.attempts > 0
+
+    def record_click(self, *, now: float, retry_delay: float) -> None:
+        self.attempts += 1
+        self._missing_frames = 0
+        self.retry_at = now + max(0.0, retry_delay)
+
+    def observe(
+        self,
+        *,
+        confirm_found: bool,
+        required_misses: int,
+    ) -> bool:
+        if not self.awaiting_dismissal:
+            return False
+        if confirm_found:
+            self._missing_frames = 0
+            return False
+        self._missing_frames += 1
+        return self._missing_frames >= max(1, int(required_misses))
+
+    def can_click(self, *, now: float, max_attempts: int) -> bool:
+        return (
+            self.attempts < max(1, int(max_attempts))
+            and now >= self.retry_at
+        )
+
+    def exhausted(self, *, now: float, max_attempts: int) -> bool:
+        return (
+            self.attempts >= max(1, int(max_attempts))
+            and now >= self.retry_at
+        )
+
+    def reset(self) -> None:
+        self.attempts = 0
+        self._missing_frames = 0
+        self.retry_at = 0.0
 
 
 class AutoSkipWorker:
@@ -63,21 +171,13 @@ class AutoSkipWorker:
         config: AppConfig,
         detector: TemplateDetector,
         on_status: Optional[StatusCallback] = None,
-        blacklist: Optional[SkipBlacklist] = None,
-        reinforce: Optional[ReinforceStore] = None,
     ) -> None:
-        self.config = config
+        self.config = copy.deepcopy(config)
         self.detector = detector
         self.on_status = on_status
-        self.blacklist = blacklist or SkipBlacklist()
-        self.reinforce = reinforce or ReinforceStore()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
-        self.status = WorkerStatus(
-            blacklist_size=self.blacklist.count(),
-            reinforce_size=self.reinforce.count(),
-            reinforce_max=getattr(config, "reinforce_max", 50),
-        )
+        self.status = WorkerStatus()
         self._lock = threading.Lock()
 
     @property
@@ -87,7 +187,6 @@ class AutoSkipWorker:
     def start(self) -> None:
         if self.is_running:
             return
-        self.blacklist.load()
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
@@ -100,28 +199,14 @@ class AutoSkipWorker:
 
     def update_config(self, config: AppConfig) -> None:
         with self._lock:
-            self.config = config
-
-    def clear_blacklist(self) -> None:
-        self.blacklist.clear()
-        with self._lock:
-            self.status.blacklist_size = 0
-        self._emit(WorkerState.IDLE, "已清空誤判名單")
-
-    def clear_reinforce(self) -> None:
-        self.reinforce.clear()
-        with self._lock:
-            langs = list(self.config.enabled_langs)
-            self.status.reinforce_size = 0
-        self.detector.reload(langs)
-        self._emit(WorkerState.IDLE, "已清空強化模板")
+            self.config = copy.deepcopy(config)
 
     def _emit(
         self,
         state: WorkerState,
         message: str,
         *,
-        score: float = 0.0,
+        score: Optional[float] = None,
         button: str = "",
         lang: str = "",
         preview: Optional[np.ndarray] = None,
@@ -142,12 +227,7 @@ class AutoSkipWorker:
                 self.status.client_size = client_size
             self.status.state = state
             self.status.message = message
-            self.status.blacklist_size = self.blacklist.count()
-            self.status.reinforce_size = self.reinforce.count()
-            self.status.reinforce_max = int(
-                getattr(self.config, "reinforce_max", 50)
-            )
-            if score:
+            if score is not None:
                 self.status.last_score = score
             if button:
                 self.status.last_button = button
@@ -163,10 +243,6 @@ class AutoSkipWorker:
                 preview_bgr=preview_out,
                 skip_count=self.status.skip_count,
                 confirm_count=self.status.confirm_count,
-                avoid_count=self.status.avoid_count,
-                blacklist_size=self.status.blacklist_size,
-                reinforce_size=self.status.reinforce_size,
-                reinforce_max=self.status.reinforce_max,
                 detect_fps=self.status.detect_fps,
                 client_size=self.status.client_size,
             )
@@ -199,16 +275,39 @@ class AutoSkipWorker:
         normalized = cv2.resize(frame, (ew, eh), interpolation=cv2.INTER_AREA)
         return normalized, w / ew, h / eh
 
+    def _detect_match(
+        self,
+        frame: np.ndarray,
+        cfg: AppConfig,
+        button: str,
+    ) -> MatchResult:
+        if button == "skip" and getattr(cfg, "skip_fixed", True):
+            return self.detector.match_skip_fixed(
+                frame,
+                rel_x=float(getattr(cfg, "skip_rel_x", 0.82125)),
+                rel_y=float(getattr(cfg, "skip_rel_y", 0.055556)),
+                box_w=float(getattr(cfg, "skip_box_w", 0.04)),
+                box_h=float(getattr(cfg, "skip_box_h", 0.045)),
+                threshold=float(cfg.threshold),
+                require_presence=bool(
+                    getattr(cfg, "skip_fixed_require_presence", True)
+                ),
+            )
+        return self.detector.match(
+            frame,
+            button=button,
+            threshold=cfg.threshold,
+            scale_match=cfg.scale_match,
+            require_confirm_text=getattr(cfg, "confirm_require_text", True),
+        )
+
     def _loop(self) -> None:
         self._emit(WorkerState.RUNNING, "偵測中…")
         window: Optional[WindowInfo] = None
         phase = "skip"  # skip | confirm
         confirm_deadline = 0.0
         focused_once = False
-        pending_skip: Optional[MatchResult] = None
-        pending_frame: Optional[np.ndarray] = None
         capturer = ScreenCapturer()
-        capturer.open()
         last_preview_at = 0.0
         last_status_at = 0.0
         preview_interval = 0.04
@@ -217,14 +316,14 @@ class AutoSkipWorker:
         fps_counter = 0
         fps_start = time.monotonic()
 
+        failure_message: Optional[str] = None
         try:
+            capturer.open()
             self._run_loop(
                 window,
                 phase,
                 confirm_deadline,
                 focused_once,
-                pending_skip,
-                pending_frame,
                 capturer,
                 last_preview_at,
                 last_status_at,
@@ -234,10 +333,14 @@ class AutoSkipWorker:
                 fps_counter,
                 fps_start,
             )
+        except Exception as exc:
+            failure_message = (
+                f"偵測已因錯誤停止：{type(exc).__name__}: {exc}"
+            )
         finally:
             capturer.close()
 
-        self._emit(WorkerState.IDLE, "已停止")
+        self._emit(WorkerState.IDLE, failure_message or "已停止")
 
     def _run_loop(
         self,
@@ -245,8 +348,6 @@ class AutoSkipWorker:
         phase,
         confirm_deadline,
         focused_once,
-        pending_skip,
-        pending_frame,
         capturer: ScreenCapturer,
         last_preview_at: float,
         last_status_at: float,
@@ -256,6 +357,12 @@ class AutoSkipWorker:
         fps_counter: int,
         fps_start: float,
     ) -> None:
+        unfocused = False
+        focus_pause_at = 0.0
+        skip_consensus = MatchConsensus()
+        post_click = PostClickVerifier()
+        confirm_click = ConfirmClickTracker()
+        skip_cooldown_until = 0.0
         while not self._stop.is_set():
             with self._lock:
                 cfg = self.config
@@ -274,6 +381,9 @@ class AutoSkipWorker:
                     window = find_game_window(cfg.window_keywords)
                 window_check_at = now
                 if window is None:
+                    unfocused = False
+                    focus_pause_at = 0.0
+                    skip_consensus.reset()
                     self._emit(
                         WorkerState.ERROR,
                         "找不到遊戲視窗（請以視窗模式開啟）",
@@ -292,6 +402,36 @@ class AutoSkipWorker:
                 )
                 self._wait(0.15)
 
+            # Pause matching/clicking while the game is not the foreground window.
+            # Keep the worker running and auto-resume when focus returns
+            # (same recoverable pattern as "找不到遊戲視窗").
+            if not clicker.is_foreground(window.hwnd):
+                if not unfocused:
+                    unfocused = True
+                    focus_pause_at = time.monotonic()
+                    skip_consensus.reset()
+                    self._emit(
+                        WorkerState.ERROR,
+                        "遊戲視窗未聚焦，已暫停偵測（切回遊戲後自動繼續）",
+                        window_title=window.title,
+                        client_size=f"{window.width}×{window.height}",
+                    )
+                self._wait(0.25)
+                continue
+
+            if unfocused:
+                paused_for = time.monotonic() - focus_pause_at
+                if phase == "confirm" and paused_for > 0:
+                    confirm_deadline += paused_for
+                unfocused = False
+                focus_pause_at = 0.0
+                self._emit(
+                    WorkerState.RUNNING,
+                    "遊戲視窗已聚焦，繼續偵測…",
+                    window_title=window.title,
+                    client_size=f"{window.width}×{window.height}",
+                )
+
             try:
                 capture = capturer.capture(window)
             except Exception as exc:
@@ -306,81 +446,101 @@ class AutoSkipWorker:
             now = time.monotonic()
             grace = getattr(cfg, "confirm_grace", 3.0)
             if phase == "confirm" and now >= confirm_deadline + grace:
-                if pending_skip is not None and pending_frame is not None:
-                    if getattr(cfg, "blacklist_enabled", True):
-                        self.blacklist.add_false_positive(
-                            pending_frame, pending_skip
-                        )
-                        self._emit(
-                            WorkerState.AVOIDED,
-                            f"無確認彈窗，已記錄誤判（名單 {self.blacklist.count()}）",
-                            preview=self.detector.annotate(
-                                pending_frame, pending_skip
-                            ),
-                            window_title=window.title,
-                            client_size=size_label,
-                        )
-                    else:
-                        self._emit(
-                            WorkerState.RUNNING,
-                            "無確認彈窗（誤判名單已關閉）",
-                            window_title=window.title,
-                            client_size=size_label,
-                        )
-                pending_skip = None
-                pending_frame = None
+                if confirm_click.awaiting_dismissal:
+                    self._emit(
+                        WorkerState.ERROR,
+                        "確認按鈕點擊後仍存在，已停止避免重複點擊",
+                        window_title=window.title,
+                        client_size=size_label,
+                    )
+                    return
+                cooldown = (
+                    float(getattr(cfg, "skip_verified_cooldown", 0.75))
+                    if post_click.disappeared
+                    else float(getattr(cfg, "skip_retry_cooldown", 2.0))
+                )
+                skip_cooldown_until = now + cooldown
+                self._emit(
+                    WorkerState.RUNNING,
+                    (
+                        "Skip 已消失（此段無需確認），回到偵測"
+                        if post_click.disappeared
+                        else f"Skip 點擊未驗證，暫停重試 {cooldown:.1f} 秒"
+                    ),
+                    window_title=window.title,
+                    client_size=size_label,
+                )
                 phase = "skip"
+                post_click.reset()
+                skip_consensus.reset()
+                self._wait(cfg.scan_interval)
+                continue
+
+            if phase == "skip" and now < skip_cooldown_until:
+                if (now - last_status_at) >= status_interval:
+                    remaining = max(0.0, skip_cooldown_until - now)
+                    self._emit(
+                        WorkerState.RUNNING,
+                        f"Skip 重試冷卻中… {remaining:.1f} 秒",
+                        window_title=window.title,
+                        client_size=size_label,
+                    )
+                    last_status_at = now
+                self._wait(min(cfg.scan_interval, skip_cooldown_until - now))
+                continue
 
             button = "confirm" if phase == "confirm" else "skip"
-            match = self.detector.match(
-                match_frame,
-                button=button,
-                threshold=cfg.threshold,
-                scale_match=cfg.scale_match,
-                require_confirm_text=getattr(
-                    cfg, "confirm_require_text", True
-                ),
-            )
-
-            if (
-                button == "skip"
-                and match.found
-                and getattr(cfg, "blacklist_enabled", True)
-            ):
-                if self.blacklist.is_blocked(match_frame, match):
-                    with self._lock:
-                        self.status.avoid_count += 1
-                    if now - last_preview_at >= preview_interval:
-                        small = self._downscale_preview(match_frame, max_w=480)
-                        sh, sw = small.shape[:2]
-                        fh, fw = match_frame.shape[:2]
-                        scaled_match = MatchResult(
-                            found=True,
-                            score=match.score,
-                            x=int(match.x * sw / max(fw, 1)),
-                            y=int(match.y * sh / max(fh, 1)),
-                            w=max(1, int(match.w * sw / max(fw, 1))),
-                            h=max(1, int(match.h * sh / max(fh, 1))),
-                            lang=match.lang,
-                            template_name=match.template_name,
-                            button=match.button,
-                        )
-                        annotated = self.detector.annotate(
-                            small, scaled_match, color=(80, 80, 200)
-                        )
-                        self._emit(
-                            WorkerState.AVOIDED,
-                            f"避開已知誤判 Skip（名單 {self.blacklist.count()}）",
-                            score=match.score,
-                            button="skip",
-                            lang=match.lang,
-                            preview=annotated,
-                            window_title=window.title,
-                            client_size=size_label,
-                        )
-                        last_preview_at = now
+            match = self._detect_match(match_frame, cfg, button)
+            ready_to_click = match.found
+            consensus_count = 0
+            if button == "skip":
+                ready_to_click, consensus_count = skip_consensus.observe(
+                    match,
+                    required=int(getattr(cfg, "skip_consensus_required", 2)),
+                    window=int(getattr(cfg, "skip_consensus_window", 3)),
+                )
+            elif confirm_click.awaiting_dismissal:
+                dismissed = confirm_click.observe(
+                    confirm_found=match.found,
+                    required_misses=int(
+                        getattr(cfg, "confirm_disappear_frames", 2)
+                    ),
+                )
+                if dismissed:
+                    phase = "skip"
+                    skip_consensus.reset()
+                    post_click.reset()
+                    confirm_click.reset()
+                    skip_cooldown_until = (
+                        now
+                        + float(getattr(cfg, "skip_verified_cooldown", 0.75))
+                    )
+                    self._emit(
+                        WorkerState.RUNNING,
+                        "確認按鈕已消失，回到 Skip 偵測",
+                        window_title=window.title,
+                        client_size=size_label,
+                    )
                     self._wait(cfg.scan_interval)
                     continue
+                max_attempts = int(
+                    getattr(cfg, "confirm_max_click_attempts", 3)
+                )
+                if confirm_click.exhausted(
+                    now=now,
+                    max_attempts=max_attempts,
+                ):
+                    self._emit(
+                        WorkerState.ERROR,
+                        "確認按鈕重試後仍存在，已停止避免重複點擊",
+                        window_title=window.title,
+                        client_size=size_label,
+                    )
+                    return
+                ready_to_click = match.found and confirm_click.can_click(
+                    now=now,
+                    max_attempts=max_attempts,
+                )
 
             want_preview = (now - last_preview_at) >= preview_interval or match.found
             annotated = None
@@ -408,14 +568,75 @@ class AutoSkipWorker:
                     annotated = small
                 last_preview_at = now
 
-            if match.found:
+            if (
+                phase == "confirm"
+                and not ready_to_click
+                and now >= confirm_deadline
+            ):
+                skip_probe = self._detect_match(match_frame, cfg, "skip")
+                post_click.observe(
+                    skip_found=skip_probe.found,
+                    required_misses=int(
+                        getattr(cfg, "skip_disappear_frames", 2)
+                    ),
+                )
+
+            if ready_to_click:
                 if button == "skip":
-                    delay = float(getattr(cfg, "skip_click_delay", 0.1))
+                    delay = float(getattr(cfg, "skip_click_delay", 0.3))
                     if delay > 0:
                         self._wait(delay)
                         if self._stop.is_set():
                             return
+                        if not clicker.is_foreground(window.hwnd):
+                            continue
+                        fresh_window = refresh_window(window)
+                        if fresh_window is None:
+                            window = None
+                            continue
+                        try:
+                            capture = capturer.capture(
+                                fresh_window, force_refresh=True
+                            )
+                        except Exception as exc:
+                            self._emit(
+                                WorkerState.ERROR,
+                                f"點擊前重新截圖失敗：{exc}",
+                            )
+                            continue
+                        window = fresh_window
+                        frame = capture.frame
+                        size_label = f"{capture.width}×{capture.height}"
+                        match_frame, sx, sy = self._prepare_frame(frame, cfg)
+                        match = self._detect_match(match_frame, cfg, button)
+                        if not match.found:
+                            continue
 
+                if button == "confirm":
+                    fresh_window = refresh_window(window)
+                    if fresh_window is None:
+                        window = None
+                        continue
+                    try:
+                        capture = capturer.capture(
+                            fresh_window, force_refresh=True
+                        )
+                    except Exception as exc:
+                        self._emit(
+                            WorkerState.ERROR,
+                            f"確認前重新截圖失敗：{exc}",
+                        )
+                        continue
+                    window = fresh_window
+                    frame = capture.frame
+                    size_label = f"{capture.width}×{capture.height}"
+                    match_frame, sx, sy = self._prepare_frame(frame, cfg)
+                    match = self._detect_match(match_frame, cfg, button)
+                    if not match.found:
+                        continue
+
+                if not clicker.is_foreground(capture.hwnd):
+                    continue
                 cap_x = match.center[0] * sx
                 cap_y = match.center[1] * sy
                 screen_x, screen_y = capture.to_screen(cap_x, cap_y)
@@ -446,8 +667,6 @@ class AutoSkipWorker:
                 if button == "skip":
                     with self._lock:
                         self.status.skip_count += 1
-                    pending_skip = match
-                    pending_frame = match_frame.copy()
                     self._emit(
                         WorkerState.CLICKED_SKIP,
                         f"已點 Skip（{match.lang} · {match.score:.2f}）",
@@ -460,37 +679,31 @@ class AutoSkipWorker:
                     )
                     phase = "confirm"
                     confirm_deadline = time.monotonic() + cfg.confirm_wait
+                    post_click.reset()
+                    confirm_click.reset()
                     self._wait(cfg.confirm_wait)
                 else:
-                    with self._lock:
-                        self.status.confirm_count += 1
-                    reinforce_msg = ""
-                    if (
-                        getattr(cfg, "reinforce_enabled", True)
-                        and pending_skip is not None
-                        and pending_frame is not None
-                    ):
-                        saved, reinforce_msg = self.reinforce.try_record(
-                            skip_frame=pending_frame,
-                            skip_match=pending_skip,
-                            confirm_frame=match_frame,
-                            confirm_match=match,
-                            max_templates=int(
-                                getattr(cfg, "reinforce_max", 50)
-                            ),
-                        )
-                        if saved:
-                            self.detector.reload(cfg.enabled_langs)
-                    pending_skip = None
-                    pending_frame = None
-                    status_text = (
-                        f"已點確認（{match.lang} · {match.score:.2f}）"
+                    first_attempt = confirm_click.attempts == 0
+                    confirm_click.record_click(
+                        now=time.monotonic(),
+                        retry_delay=float(
+                            getattr(cfg, "confirm_retry_delay", 0.5)
+                        ),
                     )
-                    if reinforce_msg:
-                        status_text = f"{status_text} · {reinforce_msg}"
+                    if first_attempt:
+                        with self._lock:
+                            self.status.confirm_count += 1
+                    attempt_label = (
+                        ""
+                        if first_attempt
+                        else f"（重試 {confirm_click.attempts}）"
+                    )
                     self._emit(
                         WorkerState.CLICKED_CONFIRM,
-                        status_text,
+                        (
+                            f"已點確認{attempt_label}"
+                            f"（{match.lang} · {match.score:.2f}）"
+                        ),
                         score=match.score,
                         button="confirm",
                         lang=match.lang,
@@ -498,7 +711,7 @@ class AutoSkipWorker:
                         window_title=window.title,
                         client_size=size_label,
                     )
-                    phase = "skip"
+                    confirm_deadline = time.monotonic()
                     self._wait(0.1)
             else:
                 # Idle detect: refresh preview often, text status less often
@@ -512,11 +725,30 @@ class AutoSkipWorker:
                             f" · 實際 {size_label} / 目標 "
                             f"{cfg.resolution_label()}"
                         )
-                    msg = (
-                        f"等待確認… {match.score:.2f} · {self.status.detect_fps:.0f} FPS{warn}"
-                        if phase == "confirm"
-                        else f"偵測中… {match.score:.2f} · {self.status.detect_fps:.0f} FPS{warn}"
-                    )
+                    if phase == "confirm":
+                        verify = (
+                            " · Skip 已消失"
+                            if post_click.disappeared
+                            else ""
+                        )
+                        msg = (
+                            f"等待確認… {match.score:.2f}{verify} · "
+                            f"{self.status.detect_fps:.0f} FPS{warn}"
+                        )
+                    elif match.found:
+                        required = int(
+                            getattr(cfg, "skip_consensus_required", 2)
+                        )
+                        msg = (
+                            f"Skip 候選 {consensus_count}/{required} · "
+                            f"{match.score:.2f} · "
+                            f"{self.status.detect_fps:.0f} FPS{warn}"
+                        )
+                    else:
+                        msg = (
+                            f"偵測中… {match.score:.2f} · "
+                            f"{self.status.detect_fps:.0f} FPS{warn}"
+                        )
                     state = (
                         WorkerState.WAITING_CONFIRM
                         if phase == "confirm"

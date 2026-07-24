@@ -26,11 +26,30 @@ def short_pause(seconds: float) -> None:
     time.sleep(max(0.0, seconds))
 
 
-def click_at_screen(screen_x: int, screen_y: int) -> None:
-    """moveTo + click — same pattern as the reference script."""
+def click_at_screen(
+    screen_x: int,
+    screen_y: int,
+    *,
+    target_hwnd: Optional[int] = None,
+    client_position: Optional[Tuple[int, int]] = None,
+) -> None:
+    """Move and click, cancelling if the target loses focus."""
     x, y = int(screen_x), int(screen_y)
     pydirectinput.moveTo(x, y)
     short_pause(0.1)
+    if target_hwnd is not None:
+        if not is_foreground(target_hwnd):
+            raise RuntimeError("target window lost focus before click")
+        if client_position is not None:
+            if win32gui is None or not win32gui.IsWindow(target_hwnd):
+                raise RuntimeError("target window is unavailable before click")
+            x, y = win32gui.ClientToScreen(
+                target_hwnd,
+                (int(client_position[0]), int(client_position[1])),
+            )
+            pydirectinput.moveTo(int(x), int(y))
+            if not is_foreground(target_hwnd):
+                raise RuntimeError("target window lost focus before click")
     pydirectinput.click()
 
 
@@ -43,8 +62,13 @@ def click_match(
     client_y: int = 0,
     method: str = "cursor",
 ) -> None:
-    """Always click via pydirectinput at absolute screen coordinates."""
-    click_at_screen(screen_x, screen_y)
+    """Click the current client position only while its window is focused."""
+    click_at_screen(
+        screen_x,
+        screen_y,
+        target_hwnd=hwnd,
+        client_position=(client_x, client_y),
+    )
 
 
 def click_client(
@@ -76,6 +100,30 @@ def click_relative(
 
 def move_to(x: int, y: int) -> None:
     pydirectinput.moveTo(int(x), int(y))
+
+
+def is_foreground(hwnd: Optional[int]) -> bool:
+    """True when *hwnd* (or one of its child windows) is the foreground window."""
+    if not hwnd or win32gui is None:
+        return False
+    try:
+        if not win32gui.IsWindow(hwnd):
+            return False
+        fg = win32gui.GetForegroundWindow()
+        if not fg:
+            return False
+        if fg == hwnd:
+            return True
+        # Some clients focus a child HWND; treat the game root as focused.
+        try:
+            root = win32gui.GetAncestor(fg, 2)  # GA_ROOT
+            if root == hwnd:
+                return True
+        except Exception:
+            pass
+        return False
+    except Exception:
+        return False
 
 
 def ensure_foreground(hwnd: Optional[int]) -> bool:

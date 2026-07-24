@@ -10,6 +10,7 @@ import cv2
 from PIL import Image, ImageTk
 
 from app.config import LANGS, ROOT, TEMPLATES_DIR
+from app.mask_utils import make_sidecar_mask, mask_path_for
 from app.window_capture import capture_client, find_game_window
 
 
@@ -222,12 +223,16 @@ class TemplateCaptureDialog(ctk.CTkToplevel):
             out_path = out_dir / f"{name}_{idx}.png"
             idx += 1
         cv2.imwrite(str(out_path), crop)
+        if button == "skip":
+            mask = make_sidecar_mask(crop)
+            cv2.imwrite(str(mask_path_for(out_path)), mask)
         try:
             rel = out_path.relative_to(ROOT)
         except ValueError:
             rel = out_path
         self.hint.configure(
-            text=f"已儲存 {rel}",
+            text=f"已儲存 {rel}"
+            + (" + 標準 |>| mask" if button == "skip" else ""),
             text_color="#3ee0b0",
         )
         if self.on_saved:

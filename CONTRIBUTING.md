@@ -27,7 +27,7 @@ python main.py
 ## Pull requests
 
 - Keep changes focused and described clearly.
-- Do **not** commit `.venv/`, `dist/`, `build/`, personal `config.json`, or learned blacklist/reinforce crops.
+- Do **not** commit `.venv/`, `dist/`, `build/`, or personal `config.json`.
 - Match existing code style; avoid unrelated refactors.
 - Test on Windows with Honkai: Star Rail in **windowed** mode when behavior changes.
 

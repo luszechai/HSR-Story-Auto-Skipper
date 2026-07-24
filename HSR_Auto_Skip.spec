@@ -13,10 +13,8 @@ a = Analysis(
     binaries=ctk_binaries,
     datas=ctk_datas
     + [
-        ("assets", "assets"),
-        ("assets/brand/app.ico", "assets/brand"),
-        ("assets/brand/app.png", "assets/brand"),
-        ("config.json", "."),
+        ("assets/templates", "assets/templates"),
+        ("assets/brand", "assets/brand"),
     ],
     hiddenimports=ctk_hiddenimports
     + [

@@ -10,11 +10,9 @@ import cv2
 from PIL import Image, ImageTk
 from pynput import keyboard
 
-from app.config import AppConfig
+from app.config import ROOT, AppConfig, bundle_root
 from app.detector import TemplateDetector
-from app.blacklist import SkipBlacklist
 from app.overlay import FloatingOverlay
-from app.reinforce import ReinforceStore
 from app.settings_dialog import SettingsPage
 from app.template_capture import TemplateCaptureDialog
 from app.worker import AutoSkipWorker, WorkerState, WorkerStatus
@@ -37,7 +35,6 @@ STATE_COLORS = {
     WorkerState.WAITING_CONFIRM: AMBER,
     WorkerState.CLICKED_SKIP: ACCENT,
     WorkerState.CLICKED_CONFIRM: ACCENT,
-    WorkerState.AVOIDED: AMBER,
     WorkerState.ERROR: DANGER,
 }
 
@@ -57,14 +54,10 @@ class App(ctk.CTk):
         self.config_data = AppConfig.load()
         self.detector = TemplateDetector()
         self.detector.reload(self.config_data.enabled_langs)
-        self.blacklist = SkipBlacklist()
-        self.reinforce = ReinforceStore()
         self.worker = AutoSkipWorker(
             self.config_data,
             self.detector,
             on_status=self._on_worker_status,
-            blacklist=self.blacklist,
-            reinforce=self.reinforce,
         )
         self._preview_photo: Optional[ImageTk.PhotoImage] = None
         self._pulse_on = False
@@ -76,14 +69,11 @@ class App(ctk.CTk):
         self._build_ui()
         self._refresh_template_info()
         self._update_res_label()
-        self._refresh_blacklist_button()
         self._start_hotkeys()
         self.after(50, self._drain_status)
 
     def _apply_window_icon(self) -> None:
         """Set taskbar / title-bar icon from bundled brand assets."""
-        from app.config import ROOT, bundle_root
-
         roots = (ROOT, bundle_root())
         ico = next(
             (r / "assets" / "brand" / "app.ico" for r in roots if (r / "assets" / "brand" / "app.ico").exists()),
@@ -97,8 +87,6 @@ class App(ctk.CTk):
             if ico is not None:
                 self.iconbitmap(str(ico))
             if png is not None:
-                from PIL import Image, ImageTk
-
                 img = Image.open(png)
                 self._wm_icon = ImageTk.PhotoImage(img)
                 self.iconphoto(True, self._wm_icon)
@@ -230,24 +218,6 @@ class App(ctk.CTk):
             anchor="w",
         )
         self.count_label.pack(fill="x", padx=20, pady=2)
-
-        self.blacklist_label = ctk.CTkLabel(
-            side,
-            text="誤判名單：0",
-            font=ctk.CTkFont(family="Microsoft JhengHei UI", size=11),
-            text_color=MUTED,
-            anchor="w",
-        )
-        self.blacklist_label.pack(fill="x", padx=20, pady=2)
-
-        self.reinforce_label = ctk.CTkLabel(
-            side,
-            text=f"強化模板：{self.reinforce.count()}/{self.config_data.reinforce_max}",
-            font=ctk.CTkFont(family="Microsoft JhengHei UI", size=11),
-            text_color=MUTED,
-            anchor="w",
-        )
-        self.reinforce_label.pack(fill="x", padx=20, pady=2)
 
         self.template_label = ctk.CTkLabel(
             side,
@@ -408,55 +378,12 @@ class App(ctk.CTk):
             hover_color="#3a4660",
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=13),
             command=self._reload_templates,
-        ).pack(fill="x", padx=18, pady=(0, 8))
-
-        self.btn_blacklist = ctk.CTkButton(
-            right,
-            text=self._blacklist_btn_text(),
-            height=36,
-            corner_radius=8,
-            fg_color=ACCENT_DIM if self.config_data.blacklist_enabled else "#2a3348",
-            hover_color="#226655" if self.config_data.blacklist_enabled else "#3a4660",
-            text_color=ACCENT if self.config_data.blacklist_enabled else MUTED,
-            border_width=1,
-            border_color=ACCENT if self.config_data.blacklist_enabled else "#3a4660",
-            font=ctk.CTkFont(family="Microsoft JhengHei UI", size=13),
-            command=self._toggle_blacklist,
-        )
-        self.btn_blacklist.pack(fill="x", padx=18, pady=(0, 8))
-
-        ctk.CTkButton(
-            right,
-            text="清空誤判名單",
-            height=36,
-            corner_radius=8,
-            fg_color="#2a2030",
-            hover_color="#3d2a38",
-            text_color=AMBER,
-            border_width=1,
-            border_color="#6e5030",
-            font=ctk.CTkFont(family="Microsoft JhengHei UI", size=13),
-            command=self._clear_blacklist,
-        ).pack(fill="x", padx=18, pady=(0, 8))
-
-        ctk.CTkButton(
-            right,
-            text="清空強化模板",
-            height=36,
-            corner_radius=8,
-            fg_color="#2a2030",
-            hover_color="#3d2a38",
-            text_color=AMBER,
-            border_width=1,
-            border_color="#6e5030",
-            font=ctk.CTkFont(family="Microsoft JhengHei UI", size=13),
-            command=self._clear_reinforce,
         ).pack(fill="x", padx=18, pady=(0, 20))
 
     def _hotkey_text(self) -> str:
         start = self.config_data.hotkey_start.upper()
         stop = self.config_data.hotkey_stop.upper()
-        return f"{start}  開始\n{stop}  停止\n角落 緊急停止"
+        return f"{start}  開始\n{stop}  停止"
 
     def _update_res_label(self) -> None:
         self.res_label.configure(
@@ -470,7 +397,13 @@ class App(ctk.CTk):
             text=(
                 f"解析度 {cfg.resolution_label()}\n"
                 f"閾值 {cfg.threshold:.2f} · 目標 {max(1, int(round(1.0 / max(0.01, cfg.scan_interval))))} FPS\n"
-                f"Skip 點擊前 {getattr(cfg, 'skip_click_delay', 0.1):.2f}s\n"
+                f"Skip {'固定座標' if getattr(cfg, 'skip_fixed', True) else '模板比對'}"
+                f" ({getattr(cfg, 'skip_rel_x', 0.82125):.3f},"
+                f" {getattr(cfg, 'skip_rel_y', 0.055556):.3f})\n"
+                f"Skip 多幀確認 "
+                f"{getattr(cfg, 'skip_consensus_required', 2)}/"
+                f"{getattr(cfg, 'skip_consensus_window', 3)}\n"
+                f"Skip 點擊前 {getattr(cfg, 'skip_click_delay', 0.3):.2f}s\n"
                 f"確認等待 {cfg.confirm_wait:.2f}s\n"
                 f"語系：{langs}"
             )
@@ -480,8 +413,20 @@ class App(ctk.CTk):
     def start_detection(self) -> None:
         self.worker.update_config(self.config_data)
         counts = self.detector.count_by_button()
-        if counts.get("skip", 0) == 0:
+        needs_skip_template = not getattr(self.config_data, "skip_fixed", True)
+        if needs_skip_template and counts.get("skip", 0) == 0:
             self.status_label.configure(text="請先擷取 Skip 模板")
+            self.status_dot.configure(text_color=DANGER)
+            return
+        if counts.get("confirm", 0) == 0:
+            self.status_label.configure(text="請先擷取確認按鈕模板")
+            self.status_dot.configure(text_color=DANGER)
+            return
+        if (
+            getattr(self.config_data, "confirm_require_text", True)
+            and not self.detector.confirm_text_templates
+        ):
+            self.status_label.configure(text="缺少「確認」文字模板，已阻止啟動")
             self.status_dot.configure(text_color=DANGER)
             return
         self.worker.start()
@@ -529,13 +474,13 @@ class App(ctk.CTk):
     def _on_settings_applied(self, cfg: AppConfig) -> None:
         self.config_data = cfg
         self.worker.update_config(cfg)
-        self.detector.reload(cfg.enabled_langs)
         self._refresh_template_info()
         self._update_res_label()
         self._update_settings_summary()
         self.hotkey_hint.configure(text=self._hotkey_text())
-        self.status_label.configure(text="設定已套用")
-        self.status_dot.configure(text_color=ACCENT)
+        if self._start_hotkeys():
+            self.status_label.configure(text="設定與熱鍵已套用")
+            self.status_dot.configure(text_color=ACCENT)
 
     def _open_capture(self) -> None:
         TemplateCaptureDialog(
@@ -544,54 +489,9 @@ class App(ctk.CTk):
             on_saved=self._refresh_template_info,
         )
 
-    def _blacklist_btn_text(self) -> str:
-        on = getattr(self.config_data, "blacklist_enabled", True)
-        return "誤判名單：開啟" if on else "誤判名單：關閉"
-
-    def _refresh_blacklist_button(self) -> None:
-        on = getattr(self.config_data, "blacklist_enabled", True)
-        self.btn_blacklist.configure(
-            text=self._blacklist_btn_text(),
-            fg_color=ACCENT_DIM if on else "#2a3348",
-            hover_color="#226655" if on else "#3a4660",
-            text_color=ACCENT if on else MUTED,
-            border_color=ACCENT if on else "#3a4660",
-        )
-        size = self.blacklist.count()
-        state = "開" if on else "關"
-        self.blacklist_label.configure(text=f"誤判名單：{size}（{state}）")
-
-    def _toggle_blacklist(self) -> None:
-        self.config_data.blacklist_enabled = not getattr(
-            self.config_data, "blacklist_enabled", True
-        )
-        self.config_data.save()
-        self.worker.update_config(self.config_data)
-        self._refresh_blacklist_button()
-        self.status_label.configure(
-            text=(
-                "誤判名單已開啟"
-                if self.config_data.blacklist_enabled
-                else "誤判名單已關閉"
-            )
-        )
-
-    def _clear_blacklist(self) -> None:
-        self.worker.clear_blacklist()
-        self._refresh_blacklist_button()
-        self.status_label.configure(text="已清空誤判名單")
-
-    def _clear_reinforce(self) -> None:
-        self.worker.clear_reinforce()
-        self.reinforce_label.configure(
-            text=f"強化模板：0/{self.config_data.reinforce_max}"
-        )
-        self._refresh_template_info()
-        self.status_label.configure(text="已清空強化模板")
-
     def _reload_templates(self) -> None:
-        n = self.detector.reload(self.config_data.enabled_langs)
         self._refresh_template_info()
+        n = sum(self.detector.count_by_button().values())
         self.status_label.configure(text=f"已載入 {n} 個模板")
 
     def _refresh_template_info(self) -> None:
@@ -632,11 +532,10 @@ class App(ctk.CTk):
                     f"{self.config_data.resolution_label()}"
                 )
             )
-        if status.last_score:
-            extra = f" · {status.last_lang}" if status.last_lang else ""
-            self.score_label.configure(
-                text=f"分數：{status.last_score:.2f}{extra}"
-            )
+        extra = f" · {status.last_lang}" if status.last_lang else ""
+        self.score_label.configure(
+            text=f"分數：{status.last_score:.2f}{extra}"
+        )
         if status.detect_fps:
             self.fps_label.configure(
                 text=f"偵測：{status.detect_fps:.0f} FPS"
@@ -644,17 +543,7 @@ class App(ctk.CTk):
         self.count_label.configure(
             text=(
                 f"Skip {status.skip_count} · 確認 {status.confirm_count}"
-                f" · 避開 {status.avoid_count}"
             )
-        )
-        self.blacklist_label.configure(
-            text=(
-                f"誤判名單：{status.blacklist_size}"
-                f"（{'開' if getattr(self.config_data, 'blacklist_enabled', True) else '關'}）"
-            )
-        )
-        self.reinforce_label.configure(
-            text=f"強化模板：{status.reinforce_size}/{status.reinforce_max}"
         )
         if status.preview_bgr is not None:
             self._show_preview(status.preview_bgr)
@@ -691,7 +580,13 @@ class App(ctk.CTk):
         self.after(600, self._pulse_status)
 
     # ── Hotkeys ─────────────────────────────────────────────
-    def _start_hotkeys(self) -> None:
+    def _start_hotkeys(self) -> bool:
+        if self._hotkey_listener is not None:
+            try:
+                self._hotkey_listener.stop()
+            except Exception:
+                pass
+            self._hotkey_listener = None
         start = f"<{self.config_data.hotkey_start.lower()}>"
         stop = f"<{self.config_data.hotkey_stop.lower()}>"
         mapping = {
@@ -701,8 +596,12 @@ class App(ctk.CTk):
         try:
             self._hotkey_listener = keyboard.GlobalHotKeys(mapping)
             self._hotkey_listener.start()
-        except Exception:
+            return True
+        except Exception as exc:
             self._hotkey_listener = None
+            self.status_label.configure(text=f"全域熱鍵啟動失敗：{exc}")
+            self.status_dot.configure(text_color=DANGER)
+            return False
 
     def _on_close(self) -> None:
         self.stop_detection()

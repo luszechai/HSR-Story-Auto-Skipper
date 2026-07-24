@@ -23,7 +23,6 @@ STATE_COLORS = {
     WorkerState.WAITING_CONFIRM: "#f0a050",
     WorkerState.CLICKED_SKIP: ACCENT,
     WorkerState.CLICKED_CONFIRM: ACCENT,
-    WorkerState.AVOIDED: "#f0a050",
     WorkerState.ERROR: DANGER,
 }
 
