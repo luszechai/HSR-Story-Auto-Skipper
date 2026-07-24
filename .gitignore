@@ -8,6 +8,7 @@ config.json
 dist/
 dist_fresh/
 build/
+release/*.zip
 .idea/
 .vscode/
 *.log
