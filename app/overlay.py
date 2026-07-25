@@ -8,6 +8,7 @@ import customtkinter as ctk
 import cv2
 from PIL import Image, ImageTk
 
+from app.i18n import t
 from app.worker import WorkerState
 
 BG = "#080a10"
@@ -34,6 +35,7 @@ class FloatingOverlay(ctk.CTkToplevel):
         self,
         master,
         *,
+        ui_lang: str,
         on_start: Callable[[], None],
         on_stop: Callable[[], None],
         on_close: Optional[Callable[[], None]] = None,
@@ -42,9 +44,12 @@ class FloatingOverlay(ctk.CTkToplevel):
         self.on_start = on_start
         self.on_stop = on_stop
         self._on_close_cb = on_close
+        self._ui_lang = ui_lang
         self._photo: Optional[ImageTk.PhotoImage] = None
         self._drag_x = 0
         self._drag_y = 0
+        self._preview_visible = True
+        self._expanded_size = (320, 280)
 
         self.geometry("320x280+40+80")
         self.minsize(260, 220)
@@ -58,25 +63,23 @@ class FloatingOverlay(ctk.CTkToplevel):
         # Remove Windows title bar / chrome
         self.overrideredirect(True)
         try:
-            # Keep a thin borderless look on Windows
             self.wm_attributes("-toolwindow", True)
         except Exception:
             pass
 
         self.protocol("WM_DELETE_WINDOW", self._handle_close)
 
-        # Drag handle + close (replaces system title bar)
         header = ctk.CTkFrame(self, fg_color="#0e121a", corner_radius=0, height=34)
         header.pack(fill="x")
         header.pack_propagate(False)
 
-        title = ctk.CTkLabel(
+        self.title_label = ctk.CTkLabel(
             header,
-            text="即時預覽",
+            text=self._tt("preview.title"),
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=13, weight="bold"),
             text_color=TEXT,
         )
-        title.pack(side="left", padx=12)
+        self.title_label.pack(side="left", padx=12)
 
         self.status_dot = ctk.CTkLabel(
             header, text="●", font=ctk.CTkFont(size=12), text_color=MUTED
@@ -97,36 +100,52 @@ class FloatingOverlay(ctk.CTkToplevel):
         )
         close_btn.pack(side="right", padx=6, pady=3)
 
-        for widget in (header, title, self.status_dot):
+        self.collapse_btn = ctk.CTkButton(
+            header,
+            text="▾",
+            width=32,
+            height=28,
+            corner_radius=6,
+            fg_color="transparent",
+            hover_color="#2a3348",
+            text_color=MUTED,
+            font=ctk.CTkFont(size=14),
+            command=self._toggle_preview,
+        )
+        self.collapse_btn.pack(side="right", padx=(0, 2), pady=3)
+
+        for widget in (header, self.title_label, self.status_dot):
             widget.bind("<ButtonPress-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._on_drag)
 
         self.status_label = ctk.CTkLabel(
             self,
-            text="待命",
+            text=self._tt("status.idle"),
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=11),
             text_color=MUTED,
             anchor="w",
+            justify="left",
+            wraplength=280,
         )
         self.status_label.pack(fill="x", padx=12, pady=(6, 4))
 
-        preview_wrap = ctk.CTkFrame(self, fg_color="#06080e", corner_radius=10)
-        preview_wrap.pack(fill="both", expand=True, padx=12, pady=4)
+        self.preview_wrap = ctk.CTkFrame(self, fg_color="#06080e", corner_radius=10)
+        self.preview_wrap.pack(fill="both", expand=True, padx=12, pady=4)
         self.preview_label = ctk.CTkLabel(
-            preview_wrap,
-            text="等待畫面…",
+            self.preview_wrap,
+            text=self._tt("overlay.waiting"),
             text_color=MUTED,
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=11),
         )
         self.preview_label.pack(fill="both", expand=True, padx=4, pady=4)
 
-        btns = ctk.CTkFrame(self, fg_color="transparent")
-        btns.pack(fill="x", padx=12, pady=(6, 12))
-        btns.grid_columnconfigure((0, 1), weight=1)
+        self.btns = ctk.CTkFrame(self, fg_color="transparent")
+        self.btns.pack(fill="x", padx=12, pady=(6, 12))
+        self.btns.grid_columnconfigure((0, 1), weight=1)
 
         self.btn_start = ctk.CTkButton(
-            btns,
-            text="開始",
+            self.btns,
+            text=self._tt("overlay.start"),
             height=34,
             corner_radius=8,
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=13, weight="bold"),
@@ -140,8 +159,8 @@ class FloatingOverlay(ctk.CTkToplevel):
         self.btn_start.grid(row=0, column=0, sticky="ew", padx=(0, 4))
 
         self.btn_stop = ctk.CTkButton(
-            btns,
-            text="停止",
+            self.btns,
+            text=self._tt("controls.stop"),
             height=34,
             corner_radius=8,
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=13),
@@ -155,7 +174,50 @@ class FloatingOverlay(ctk.CTkToplevel):
         )
         self.btn_stop.grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
+        self._sync_collapse_chrome()
         self.after(2000, self._keep_topmost)
+
+    def _tt(self, key: str, **kwargs) -> str:
+        return t(key, lang=self._ui_lang, **kwargs)
+
+    def set_ui_lang(self, lang: str) -> None:
+        if lang == self._ui_lang:
+            return
+        self._ui_lang = lang
+        self.title_label.configure(text=self._tt("preview.title"))
+        self.btn_start.configure(text=self._tt("overlay.start"))
+        self.btn_stop.configure(text=self._tt("controls.stop"))
+        if self._photo is None:
+            self.preview_label.configure(text=self._tt("overlay.waiting"))
+        self._sync_collapse_chrome()
+
+    def _sync_collapse_chrome(self) -> None:
+        if self._preview_visible:
+            self.collapse_btn.configure(text="▾")
+            try:
+                self.collapse_btn.configure(hover_color="#2a3348")
+            except Exception:
+                pass
+        else:
+            self.collapse_btn.configure(text="▸")
+
+    def _toggle_preview(self) -> None:
+        if self._preview_visible:
+            self._expanded_size = (max(260, self.winfo_width()), max(220, self.winfo_height()))
+            self.preview_wrap.pack_forget()
+            self._preview_visible = False
+            self.minsize(260, 118)
+            collapsed_h = 34 + 48 + 52
+            self.geometry(f"{self._expanded_size[0]}x{collapsed_h}")
+        else:
+            self.preview_wrap.pack(
+                fill="both", expand=True, padx=12, pady=4, before=self.btns
+            )
+            self._preview_visible = True
+            self.minsize(260, 220)
+            w, h = self._expanded_size
+            self.geometry(f"{w}x{h}")
+        self._sync_collapse_chrome()
 
     def _start_drag(self, event) -> None:
         self._drag_x = event.x_root - self.winfo_x()
@@ -195,11 +257,13 @@ class FloatingOverlay(ctk.CTkToplevel):
             return
         color = STATE_COLORS.get(state, MUTED)
         self.status_dot.configure(text_color=color)
-        text = message if len(message) <= 36 else message[:34] + "…"
-        self.status_label.configure(text=text, text_color=TEXT)
+        self.status_label.configure(text=message, text_color=TEXT)
+        # Keep wrap width roughly matched to current window.
+        wrap = max(160, self.winfo_width() - 40)
+        self.status_label.configure(wraplength=wrap)
 
     def update_preview(self, frame_bgr) -> None:
-        if not self.winfo_exists() or frame_bgr is None:
+        if not self.winfo_exists() or frame_bgr is None or not self._preview_visible:
             return
         self.update_idletasks()
         max_w = max(120, self.preview_label.winfo_width() - 8)

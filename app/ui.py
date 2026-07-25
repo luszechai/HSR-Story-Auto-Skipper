@@ -12,6 +12,7 @@ from pynput import keyboard
 
 from app.config import ROOT, AppConfig, bundle_root
 from app.detector import TemplateDetector
+from app.i18n import format_status, lang_display, t
 from app.overlay import FloatingOverlay
 from app.settings_dialog import SettingsPage
 from app.template_capture import TemplateCaptureDialog
@@ -53,7 +54,7 @@ class App(ctk.CTk):
 
         self.config_data = AppConfig.load()
         self.detector = TemplateDetector()
-        self.detector.reload(self.config_data.enabled_langs)
+        self.detector.reload([self.config_data.game_lang])
         self.worker = AutoSkipWorker(
             self.config_data,
             self.detector,
@@ -63,6 +64,7 @@ class App(ctk.CTk):
         self._pulse_on = False
         self._hotkey_listener: Optional[keyboard.GlobalHotKeys] = None
         self._pending_status: Optional[WorkerStatus] = None
+        self._last_status: Optional[WorkerStatus] = None
         self._status_lock = threading.Lock()
         self._overlay: Optional[FloatingOverlay] = None
 
@@ -148,12 +150,13 @@ class App(ctk.CTk):
             font=ctk.CTkFont(family="Segoe UI", size=20),
             text_color=TEXT,
         ).pack(anchor="w")
-        ctk.CTkLabel(
+        self.brand_subtitle = ctk.CTkLabel(
             brand,
-            text="劇情自動跳過",
+            text=self._t("app.subtitle"),
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=12),
             text_color=MUTED,
-        ).pack(anchor="w", pady=(4, 0))
+        )
+        self.brand_subtitle.pack(anchor="w", pady=(4, 0))
 
         status_box = ctk.CTkFrame(side, fg_color=PANEL_ALT, corner_radius=12)
         status_box.pack(fill="x", padx=16, pady=(24, 8))
@@ -165,7 +168,7 @@ class App(ctk.CTk):
         self.status_dot.pack(side="left")
         self.status_label = ctk.CTkLabel(
             row,
-            text="待命",
+            text=self._t("status.idle"),
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=13),
             text_color=TEXT,
             anchor="w",
@@ -174,7 +177,7 @@ class App(ctk.CTk):
 
         self.window_label = ctk.CTkLabel(
             side,
-            text="視窗：—",
+            text=self._t("sidebar.window_empty"),
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=11),
             text_color=MUTED,
             anchor="w",
@@ -184,7 +187,7 @@ class App(ctk.CTk):
 
         self.res_label = ctk.CTkLabel(
             side,
-            text="解析度：—",
+            text=self._t("sidebar.res_empty"),
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=11),
             text_color=MUTED,
             anchor="w",
@@ -194,7 +197,7 @@ class App(ctk.CTk):
 
         self.score_label = ctk.CTkLabel(
             side,
-            text="分數：—",
+            text=self._t("sidebar.score_empty"),
             font=ctk.CTkFont(size=11),
             text_color=MUTED,
             anchor="w",
@@ -203,7 +206,7 @@ class App(ctk.CTk):
 
         self.fps_label = ctk.CTkLabel(
             side,
-            text="偵測：— FPS",
+            text=self._t("sidebar.fps_empty"),
             font=ctk.CTkFont(size=11),
             text_color=MUTED,
             anchor="w",
@@ -212,7 +215,7 @@ class App(ctk.CTk):
 
         self.count_label = ctk.CTkLabel(
             side,
-            text="Skip 0 · 確認 0",
+            text=self._t("sidebar.counts", skip=0, confirm=0),
             font=ctk.CTkFont(size=11),
             text_color=MUTED,
             anchor="w",
@@ -221,7 +224,7 @@ class App(ctk.CTk):
 
         self.template_label = ctk.CTkLabel(
             side,
-            text="模板：0",
+            text=self._t("sidebar.templates_empty"),
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=11),
             text_color=MUTED,
             anchor="w",
@@ -231,12 +234,13 @@ class App(ctk.CTk):
 
         hk = ctk.CTkFrame(side, fg_color=PANEL_ALT, corner_radius=12)
         hk.pack(side="bottom", fill="x", padx=16, pady=20)
-        ctk.CTkLabel(
+        self.hotkey_title = ctk.CTkLabel(
             hk,
-            text="熱鍵",
+            text=self._t("sidebar.hotkeys"),
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color=MUTED,
-        ).pack(anchor="w", padx=14, pady=(12, 2))
+        )
+        self.hotkey_title.pack(anchor="w", padx=14, pady=(12, 2))
         self.hotkey_hint = ctk.CTkLabel(
             hk,
             text=self._hotkey_text(),
@@ -254,24 +258,26 @@ class App(ctk.CTk):
 
         head = ctk.CTkFrame(mid, fg_color="transparent")
         head.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 4))
-        ctk.CTkLabel(
+        self.preview_title = ctk.CTkLabel(
             head,
-            text="即時預覽",
+            text=self._t("preview.title"),
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=14, weight="bold"),
             text_color=TEXT,
-        ).pack(side="left")
-        ctk.CTkLabel(
+        )
+        self.preview_title.pack(side="left")
+        self.preview_hint = ctk.CTkLabel(
             head,
-            text="命中時會標示按鈕區域",
+            text=self._t("preview.hint"),
             font=ctk.CTkFont(size=11),
             text_color=MUTED,
-        ).pack(side="right")
+        )
+        self.preview_hint.pack(side="right")
 
         preview_wrap = ctk.CTkFrame(mid, fg_color="#06080e", corner_radius=12)
         preview_wrap.grid(row=1, column=0, sticky="nsew", padx=16, pady=(4, 16))
         self.preview_label = ctk.CTkLabel(
             preview_wrap,
-            text="啟動後顯示遊戲畫面",
+            text=self._t("preview.placeholder"),
             text_color=MUTED,
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=13),
         )
@@ -282,16 +288,17 @@ class App(ctk.CTk):
         right.grid(row=0, column=1, sticky="nse")
         right.grid_propagate(False)
 
-        ctk.CTkLabel(
+        self.controls_title = ctk.CTkLabel(
             right,
-            text="控制",
+            text=self._t("controls.title"),
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=14, weight="bold"),
             text_color=TEXT,
-        ).pack(anchor="w", padx=18, pady=(20, 12))
+        )
+        self.controls_title.pack(anchor="w", padx=18, pady=(20, 12))
 
         self.btn_start = ctk.CTkButton(
             right,
-            text="開始偵測",
+            text=self._t("controls.start"),
             height=42,
             corner_radius=10,
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=14, weight="bold"),
@@ -306,7 +313,7 @@ class App(ctk.CTk):
 
         self.btn_stop = ctk.CTkButton(
             right,
-            text="停止",
+            text=self._t("controls.stop"),
             height=42,
             corner_radius=10,
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=14),
@@ -333,9 +340,9 @@ class App(ctk.CTk):
         self.settings_summary.pack(fill="x", padx=18, pady=(0, 12))
         self._update_settings_summary()
 
-        ctk.CTkButton(
+        self.btn_settings = ctk.CTkButton(
             right,
-            text="設定",
+            text=self._t("controls.settings"),
             height=40,
             corner_radius=10,
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=14, weight="bold"),
@@ -345,69 +352,117 @@ class App(ctk.CTk):
             border_width=1,
             border_color="#3a4660",
             command=self._open_settings,
-        ).pack(fill="x", padx=18, pady=(4, 8))
+        )
+        self.btn_settings.pack(fill="x", padx=18, pady=(4, 8))
 
-        ctk.CTkButton(
+        self.btn_overlay = ctk.CTkButton(
             right,
-            text="浮動預覽窗",
+            text=self._t("controls.overlay"),
             height=36,
             corner_radius=8,
             fg_color="#1c2233",
             hover_color="#2a3348",
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=13),
             command=self._open_overlay,
-        ).pack(fill="x", padx=18, pady=(0, 8))
+        )
+        self.btn_overlay.pack(fill="x", padx=18, pady=(0, 8))
 
-        ctk.CTkButton(
+        self.btn_capture = ctk.CTkButton(
             right,
-            text="擷取模板",
+            text=self._t("controls.capture"),
             height=36,
             corner_radius=8,
             fg_color=BLUE,
             hover_color="#388bfd",
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=13),
             command=self._open_capture,
-        ).pack(fill="x", padx=18, pady=(4, 8))
+        )
+        self.btn_capture.pack(fill="x", padx=18, pady=(4, 8))
 
-        ctk.CTkButton(
+        self.btn_reload = ctk.CTkButton(
             right,
-            text="重新載入模板",
+            text=self._t("controls.reload"),
             height=36,
             corner_radius=8,
             fg_color="#2a3348",
             hover_color="#3a4660",
             font=ctk.CTkFont(family="Microsoft JhengHei UI", size=13),
             command=self._reload_templates,
-        ).pack(fill="x", padx=18, pady=(0, 20))
+        )
+        self.btn_reload.pack(fill="x", padx=18, pady=(0, 20))
+
+    def _t(self, key: str, **kwargs) -> str:
+        # Pass UI locale as keyword so format kwargs (e.g. label=) never collide.
+        return t(key, lang=self.config_data.ui_lang, **kwargs)
+
+    def _format_status(self, status: WorkerStatus) -> str:
+        return format_status(
+            status.message_key,
+            lang=self.config_data.ui_lang,
+            **status.message_kwargs,
+        )
 
     def _hotkey_text(self) -> str:
         start = self.config_data.hotkey_start.upper()
         stop = self.config_data.hotkey_stop.upper()
-        return f"{start}  開始\n{stop}  停止"
+        return self._t("sidebar.hotkey_text", start=start, stop=stop)
 
     def _update_res_label(self) -> None:
         self.res_label.configure(
-            text=f"目標：{self.config_data.resolution_label()}"
+            text=self._t(
+                "sidebar.res_target", label=self.config_data.resolution_label()
+            )
         )
 
     def _update_settings_summary(self) -> None:
         cfg = self.config_data
-        langs = "、".join(cfg.enabled_langs) if cfg.enabled_langs else "—"
+        fps = max(1, int(round(1.0 / max(0.01, cfg.scan_interval))))
+        skip_mode = self._t(
+            "summary.skip_fixed"
+            if getattr(cfg, "skip_fixed", True)
+            else "summary.skip_template"
+        )
         self.settings_summary.configure(
             text=(
-                f"解析度 {cfg.resolution_label()}\n"
-                f"閾值 {cfg.threshold:.2f} · 目標 {max(1, int(round(1.0 / max(0.01, cfg.scan_interval))))} FPS\n"
-                f"Skip {'固定座標' if getattr(cfg, 'skip_fixed', True) else '模板比對'}"
-                f" ({getattr(cfg, 'skip_rel_x', 0.82125):.3f},"
-                f" {getattr(cfg, 'skip_rel_y', 0.055556):.3f})\n"
-                f"Skip 多幀確認 "
-                f"{getattr(cfg, 'skip_consensus_required', 2)}/"
-                f"{getattr(cfg, 'skip_consensus_window', 3)}\n"
-                f"Skip 點擊前 {getattr(cfg, 'skip_click_delay', 0.3):.2f}s\n"
-                f"確認等待 {cfg.confirm_wait:.2f}s\n"
-                f"語系：{langs}"
+                f"{self._t('summary.resolution', label=cfg.resolution_label())}\n"
+                f"{self._t('summary.threshold_fps', threshold=cfg.threshold, fps=fps)}\n"
+                f"{skip_mode}"
+                f"{self._t('summary.skip_coords', x=getattr(cfg, 'skip_rel_x', 0.82125), y=getattr(cfg, 'skip_rel_y', 0.055556))}\n"
+                f"{self._t('summary.skip_consensus', required=getattr(cfg, 'skip_consensus_required', 2), window=getattr(cfg, 'skip_consensus_window', 3))}\n"
+                f"{self._t('summary.skip_delay', delay=getattr(cfg, 'skip_click_delay', 0.3))}\n"
+                f"{self._t('summary.confirm_wait', wait=cfg.confirm_wait)}\n"
+                f"{self._t('summary.ui_lang', label=lang_display(cfg.ui_lang))}\n"
+                f"{self._t('summary.game_lang', label=lang_display(cfg.game_lang))}"
             )
         )
+
+    def _retranslate_ui(self) -> None:
+        """Refresh main-window labels after ui_lang changes."""
+        self.brand_subtitle.configure(text=self._t("app.subtitle"))
+        self.hotkey_title.configure(text=self._t("sidebar.hotkeys"))
+        self.hotkey_hint.configure(text=self._hotkey_text())
+        self.preview_title.configure(text=self._t("preview.title"))
+        self.preview_hint.configure(text=self._t("preview.hint"))
+        if not self._preview_photo:
+            self.preview_label.configure(text=self._t("preview.placeholder"))
+        self.controls_title.configure(text=self._t("controls.title"))
+        self.btn_start.configure(text=self._t("controls.start"))
+        self.btn_stop.configure(text=self._t("controls.stop"))
+        self.btn_settings.configure(text=self._t("controls.settings"))
+        self.btn_overlay.configure(text=self._t("controls.overlay"))
+        self.btn_capture.configure(text=self._t("controls.capture"))
+        self.btn_reload.configure(text=self._t("controls.reload"))
+        self._update_res_label()
+        self._update_settings_summary()
+        self._refresh_template_info()
+        self.settings_page.set_ui_lang(self.config_data.ui_lang)
+        if self._overlay is not None and self._overlay.winfo_exists():
+            self._overlay.set_ui_lang(self.config_data.ui_lang)
+        if self._last_status is not None:
+            text = self._format_status(self._last_status)
+            self.status_label.configure(text=text)
+            if self._overlay is not None and self._overlay.winfo_exists():
+                self._overlay.update_status(self._last_status.state, text)
 
     # ── Actions ─────────────────────────────────────────────
     def start_detection(self) -> None:
@@ -415,20 +470,22 @@ class App(ctk.CTk):
         counts = self.detector.count_by_button()
         needs_skip_template = not getattr(self.config_data, "skip_fixed", True)
         if needs_skip_template and counts.get("skip", 0) == 0:
-            self.status_label.configure(text="請先擷取 Skip 模板")
+            self.status_label.configure(text=self._t("status.need_skip_template"))
             self.status_dot.configure(text_color=DANGER)
             return
         if counts.get("confirm", 0) == 0:
-            self.status_label.configure(text="請先擷取確認按鈕模板")
+            self.status_label.configure(text=self._t("status.need_confirm_template"))
             self.status_dot.configure(text_color=DANGER)
             return
-        if (
-            getattr(self.config_data, "confirm_require_text", True)
-            and not self.detector.confirm_text_templates
-        ):
-            self.status_label.configure(text="缺少「確認」文字模板，已阻止啟動")
-            self.status_dot.configure(text_color=DANGER)
-            return
+        if getattr(self.config_data, "confirm_require_text", True):
+            missing_text = self.detector.missing_confirm_text_langs()
+            if missing_text:
+                langs = "、".join(missing_text)
+                self.status_label.configure(
+                    text=self._t("status.missing_confirm_text", langs=langs)
+                )
+                self.status_dot.configure(text_color=DANGER)
+                return
         self.worker.start()
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
@@ -450,11 +507,17 @@ class App(ctk.CTk):
             return
         self._overlay = FloatingOverlay(
             self,
+            ui_lang=self.config_data.ui_lang,
             on_start=self.start_detection,
             on_stop=self.stop_detection,
             on_close=self._on_overlay_closed,
         )
         self._overlay.set_running(self.worker.is_running)
+        if self._last_status is not None:
+            self._overlay.update_status(
+                self._last_status.state,
+                self._format_status(self._last_status),
+            )
 
     def _on_overlay_closed(self) -> None:
         self._overlay = None
@@ -474,31 +537,33 @@ class App(ctk.CTk):
     def _on_settings_applied(self, cfg: AppConfig) -> None:
         self.config_data = cfg
         self.worker.update_config(cfg)
-        self._refresh_template_info()
-        self._update_res_label()
-        self._update_settings_summary()
-        self.hotkey_hint.configure(text=self._hotkey_text())
+        self._retranslate_ui()
         if self._start_hotkeys():
-            self.status_label.configure(text="設定與熱鍵已套用")
+            self.status_label.configure(text=self._t("status.settings_applied"))
             self.status_dot.configure(text_color=ACCENT)
 
     def _open_capture(self) -> None:
         TemplateCaptureDialog(
             self,
             keywords=self.config_data.window_keywords,
+            default_lang=self.config_data.game_lang,
             on_saved=self._refresh_template_info,
         )
 
     def _reload_templates(self) -> None:
         self._refresh_template_info()
         n = sum(self.detector.count_by_button().values())
-        self.status_label.configure(text=f"已載入 {n} 個模板")
+        self.status_label.configure(text=self._t("status.templates_loaded", n=n))
 
     def _refresh_template_info(self) -> None:
-        self.detector.reload(self.config_data.enabled_langs)
+        self.detector.reload([self.config_data.game_lang])
         counts = self.detector.count_by_button()
         self.template_label.configure(
-            text=f"模板：Skip {counts.get('skip', 0)} · 確認 {counts.get('confirm', 0)}"
+            text=self._t(
+                "sidebar.templates",
+                skip=counts.get("skip", 0),
+                confirm=counts.get("confirm", 0),
+            )
         )
 
     # ── Status / preview ────────────────────────────────────
@@ -517,32 +582,43 @@ class App(ctk.CTk):
         self.after(16, self._drain_status)
 
     def _apply_status(self, status: WorkerStatus) -> None:
+        self._last_status = status
         color = STATE_COLORS.get(status.state, MUTED)
         self.status_dot.configure(text_color=color)
-        self.status_label.configure(text=status.message)
+        status_text = self._format_status(status)
+        self.status_label.configure(text=status_text)
         if status.window_title:
             title = status.window_title
             if len(title) > 28:
                 title = title[:26] + "…"
-            self.window_label.configure(text=f"視窗：{title}")
+            self.window_label.configure(
+                text=self._t("sidebar.window", title=title)
+            )
         if status.client_size:
             self.res_label.configure(
-                text=(
-                    f"實際 {status.client_size} · 目標 "
-                    f"{self.config_data.resolution_label()}"
+                text=self._t(
+                    "sidebar.res_live",
+                    actual=status.client_size,
+                    target=self.config_data.resolution_label(),
                 )
             )
         extra = f" · {status.last_lang}" if status.last_lang else ""
         self.score_label.configure(
-            text=f"分數：{status.last_score:.2f}{extra}"
+            text=self._t(
+                "sidebar.score",
+                score=f"{status.last_score:.2f}",
+                extra=extra,
+            )
         )
         if status.detect_fps:
             self.fps_label.configure(
-                text=f"偵測：{status.detect_fps:.0f} FPS"
+                text=self._t("sidebar.fps", fps=f"{status.detect_fps:.0f}")
             )
         self.count_label.configure(
-            text=(
-                f"Skip {status.skip_count} · 確認 {status.confirm_count}"
+            text=self._t(
+                "sidebar.counts",
+                skip=status.skip_count,
+                confirm=status.confirm_count,
             )
         )
         if status.preview_bgr is not None:
@@ -550,7 +626,7 @@ class App(ctk.CTk):
             if self._overlay is not None and self._overlay.winfo_exists():
                 self._overlay.update_preview(status.preview_bgr)
         if self._overlay is not None and self._overlay.winfo_exists():
-            self._overlay.update_status(status.state, status.message)
+            self._overlay.update_status(status.state, status_text)
         if status.state == WorkerState.IDLE:
             self.btn_start.configure(state="normal")
             self.btn_stop.configure(state="disabled")
@@ -599,7 +675,9 @@ class App(ctk.CTk):
             return True
         except Exception as exc:
             self._hotkey_listener = None
-            self.status_label.configure(text=f"全域熱鍵啟動失敗：{exc}")
+            self.status_label.configure(
+                text=self._t("status.hotkey_fail", exc=exc)
+            )
             self.status_dot.configure(text_color=DANGER)
             return False
 

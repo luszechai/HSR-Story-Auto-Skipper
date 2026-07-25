@@ -61,30 +61,68 @@ class TemplateDetector:
         self.templates_dir = templates_dir
         self.confirm_text_dir = templates_dir / "confirm_text"
         self.templates: List[TemplateEntry] = []
-        self.confirm_text_templates: List[np.ndarray] = []
+        # lang -> glyph crops for Confirm label text (確認 / 确认 / Confirm / …)
+        self.confirm_text_templates: Dict[str, List[np.ndarray]] = {}
         self.reload()
 
     def reload(self, enabled_langs: Optional[Sequence[str]] = None) -> int:
+        """Reload templates for the given language codes (usually one game_lang)."""
         langs = set(enabled_langs or LANGS)
         templates: List[TemplateEntry] = []
         self._load_tree(self.templates_dir, langs, templates)
-        confirm_text_templates = self._load_confirm_text()
+        confirm_text_templates = self._load_confirm_text(langs)
         self.templates = templates
         self.confirm_text_templates = confirm_text_templates
         return len(self.templates)
 
-    def _load_confirm_text(self) -> List[np.ndarray]:
-        """Glyph templates for the word 確認 — required to accept a Confirm hit."""
-        templates: List[np.ndarray] = []
+    def _load_confirm_text(self, langs: set) -> Dict[str, List[np.ndarray]]:
+        """Load Confirm-label glyph templates, separated by language folder."""
+        by_lang: Dict[str, List[np.ndarray]] = {}
         if not self.confirm_text_dir.exists():
-            return templates
+            return by_lang
+
+        def append_from(folder: Path, lang: str) -> None:
+            for pattern in ("*.png", "*.jpg"):
+                for path in sorted(folder.glob(pattern)):
+                    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+                    if img is None or img.size == 0:
+                        continue
+                    by_lang.setdefault(lang, []).append(
+                        cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    )
+
+        # Preferred layout: confirm_text/{zh_tw,zh_cn,en,jp}/*.png
+        for lang_dir in sorted(self.confirm_text_dir.iterdir()):
+            if not lang_dir.is_dir():
+                continue
+            if lang_dir.name not in langs:
+                continue
+            append_from(lang_dir, lang_dir.name)
+
+        # Legacy flat files: confirm_text/*.png shared across enabled langs.
         for pattern in ("*.png", "*.jpg"):
             for path in sorted(self.confirm_text_dir.glob(pattern)):
                 img = cv2.imread(str(path), cv2.IMREAD_COLOR)
                 if img is None or img.size == 0:
                     continue
-                templates.append(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
-        return templates
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                for lang in langs:
+                    by_lang.setdefault(lang, []).append(gray)
+        return by_lang
+
+    def confirm_text_for_lang(self, lang: str) -> List[np.ndarray]:
+        return list(self.confirm_text_templates.get(lang, []))
+
+    def missing_confirm_text_langs(self) -> List[str]:
+        """Confirm button langs that lack matching Confirm-text templates."""
+        confirm_langs = sorted(
+            {t.lang for t in self.templates if t.button == "confirm"}
+        )
+        return [
+            lang
+            for lang in confirm_langs
+            if not self.confirm_text_templates.get(lang)
+        ]
 
     def _load_tree(
         self,
@@ -92,16 +130,24 @@ class TemplateDetector:
         langs: set,
         templates: List[TemplateEntry],
     ) -> None:
-        for button in ("skip", "confirm"):
-            button_dir = root / button
-            if not button_dir.exists():
+        # Skip is a language-independent |>| icon. Prefer flat files under
+        # skip/*.png, and still accept legacy skip/<lang>/*.png.
+        skip_dir = root / "skip"
+        if skip_dir.exists():
+            self._load_images("skip", "any", skip_dir, templates)
+            for lang_dir in sorted(skip_dir.iterdir()):
+                if lang_dir.is_dir():
+                    self._load_images("skip", "any", lang_dir, templates)
+
+        confirm_dir = root / "confirm"
+        if not confirm_dir.exists():
+            return
+        for lang_dir in sorted(confirm_dir.iterdir()):
+            if not lang_dir.is_dir():
                 continue
-            for lang_dir in sorted(button_dir.iterdir()):
-                if not lang_dir.is_dir():
-                    continue
-                if lang_dir.name not in langs:
-                    continue
-                self._load_images(button, lang_dir.name, lang_dir, templates)
+            if lang_dir.name not in langs:
+                continue
+            self._load_images("confirm", lang_dir.name, lang_dir, templates)
 
     def _load_images(
         self,
@@ -204,9 +250,12 @@ class TemplateDetector:
         frame_bgr: np.ndarray,
         match: Optional[MatchResult] = None,
         threshold: float = 0.75,
+        lang: Optional[str] = None,
     ) -> bool:
-        """Return True if the word 確認 is visible near the confirm match / ROI."""
-        if not self.confirm_text_templates:
+        """Return True if Confirm-label text for *lang* is visible near the match."""
+        text_lang = lang or (match.lang if match is not None else "")
+        templates = self.confirm_text_for_lang(text_lang)
+        if not templates:
             return False
         fh, fw = frame_bgr.shape[:2]
         if match is not None and match.w > 0 and match.h > 0:
@@ -224,7 +273,7 @@ class TemplateDetector:
         gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
         rh, rw = gray.shape[:2]
         best = 0.0
-        for tmpl in self.confirm_text_templates:
+        for tmpl in templates:
             th, tw = tmpl.shape[:2]
             for scale in (0.85, 1.0, 1.15):
                 nw = max(8, int(tw * scale))
@@ -562,20 +611,25 @@ class TemplateDetector:
             return empty
         best.found = best.score >= threshold
 
-        # Confirm must also contain the word 確認
+        # Confirm must also contain the language-specific Confirm label text.
         if (
             button == "confirm"
             and best.found
             and require_confirm_text
         ):
-            if not self.confirm_text_templates:
+            if not self.confirm_text_for_lang(best.lang):
                 best.found = False
-                best.template_name = f"{best.template_name}|missing_確認_template"
+                best.template_name = (
+                    f"{best.template_name}|missing_confirm_text:{best.lang}"
+                )
             elif not self.contains_confirm_text(
-                frame_bgr, best, threshold=max(0.70, threshold - 0.12)
+                frame_bgr,
+                best,
+                threshold=max(0.70, threshold - 0.12),
+                lang=best.lang,
             ):
                 best.found = False
-                best.template_name = f"{best.template_name}|no_確認"
+                best.template_name = f"{best.template_name}|no_confirm_text"
 
         return best
 

@@ -6,9 +6,9 @@ import copy
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Deque, Optional
+from typing import Any, Callable, Deque, Dict, Optional
 
 import cv2
 import numpy as np
@@ -37,7 +37,8 @@ class WorkerState(str, Enum):
 @dataclass
 class WorkerStatus:
     state: WorkerState = WorkerState.IDLE
-    message: str = "待命"
+    message_key: str = "status.idle"
+    message_kwargs: Dict[str, Any] = field(default_factory=dict)
     last_score: float = 0.0
     last_button: str = ""
     last_lang: str = ""
@@ -195,7 +196,7 @@ class AutoSkipWorker:
         self._stop.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
-        self._emit(WorkerState.IDLE, "已停止")
+        self._emit(WorkerState.IDLE, "worker.stopped")
 
     def update_config(self, config: AppConfig) -> None:
         with self._lock:
@@ -204,8 +205,9 @@ class AutoSkipWorker:
     def _emit(
         self,
         state: WorkerState,
-        message: str,
+        message_key: str,
         *,
+        msg_kwargs: Optional[Dict[str, Any]] = None,
         score: Optional[float] = None,
         button: str = "",
         lang: str = "",
@@ -217,6 +219,7 @@ class AutoSkipWorker:
         preview_out: Optional[np.ndarray] = None
         if preview is not None:
             preview_out = self._downscale_preview(preview)
+        kwargs = dict(msg_kwargs or {})
 
         with self._lock:
             if preview_out is not None:
@@ -226,7 +229,8 @@ class AutoSkipWorker:
             if client_size:
                 self.status.client_size = client_size
             self.status.state = state
-            self.status.message = message
+            self.status.message_key = message_key
+            self.status.message_kwargs = kwargs
             if score is not None:
                 self.status.last_score = score
             if button:
@@ -235,7 +239,8 @@ class AutoSkipWorker:
                 self.status.last_lang = lang
             snap = WorkerStatus(
                 state=self.status.state,
-                message=self.status.message,
+                message_key=self.status.message_key,
+                message_kwargs=dict(self.status.message_kwargs),
                 last_score=self.status.last_score,
                 last_button=self.status.last_button,
                 last_lang=self.status.last_lang,
@@ -302,7 +307,7 @@ class AutoSkipWorker:
         )
 
     def _loop(self) -> None:
-        self._emit(WorkerState.RUNNING, "偵測中…")
+        self._emit(WorkerState.RUNNING, "worker.detecting")
         window: Optional[WindowInfo] = None
         phase = "skip"  # skip | confirm
         confirm_deadline = 0.0
@@ -316,7 +321,8 @@ class AutoSkipWorker:
         fps_counter = 0
         fps_start = time.monotonic()
 
-        failure_message: Optional[str] = None
+        failure_key = "worker.stopped"
+        failure_kwargs: Optional[Dict[str, Any]] = None
         try:
             capturer.open()
             self._run_loop(
@@ -334,13 +340,12 @@ class AutoSkipWorker:
                 fps_start,
             )
         except Exception as exc:
-            failure_message = (
-                f"偵測已因錯誤停止：{type(exc).__name__}: {exc}"
-            )
+            failure_key = "worker.error_stopped"
+            failure_kwargs = {"err": f"{type(exc).__name__}: {exc}"}
         finally:
             capturer.close()
 
-        self._emit(WorkerState.IDLE, failure_message or "已停止")
+        self._emit(WorkerState.IDLE, failure_key, msg_kwargs=failure_kwargs)
 
     def _run_loop(
         self,
@@ -384,10 +389,7 @@ class AutoSkipWorker:
                     unfocused = False
                     focus_pause_at = 0.0
                     skip_consensus.reset()
-                    self._emit(
-                        WorkerState.ERROR,
-                        "找不到遊戲視窗（請以視窗模式開啟）",
-                    )
+                    self._emit(WorkerState.ERROR, "worker.no_window")
                     self._wait(0.5)
                     continue
 
@@ -396,7 +398,7 @@ class AutoSkipWorker:
                 focused_once = True
                 self._emit(
                     WorkerState.RUNNING,
-                    "已聚焦遊戲視窗" if ok else "嘗試聚焦遊戲視窗…",
+                    "worker.focus_ok" if ok else "worker.focus_try",
                     window_title=window.title,
                     client_size=f"{window.width}×{window.height}",
                 )
@@ -412,7 +414,7 @@ class AutoSkipWorker:
                     skip_consensus.reset()
                     self._emit(
                         WorkerState.ERROR,
-                        "遊戲視窗未聚焦，已暫停偵測（切回遊戲後自動繼續）",
+                        "worker.paused_unfocused",
                         window_title=window.title,
                         client_size=f"{window.width}×{window.height}",
                     )
@@ -427,7 +429,7 @@ class AutoSkipWorker:
                 focus_pause_at = 0.0
                 self._emit(
                     WorkerState.RUNNING,
-                    "遊戲視窗已聚焦，繼續偵測…",
+                    "worker.focus_resumed",
                     window_title=window.title,
                     client_size=f"{window.width}×{window.height}",
                 )
@@ -435,7 +437,11 @@ class AutoSkipWorker:
             try:
                 capture = capturer.capture(window)
             except Exception as exc:
-                self._emit(WorkerState.ERROR, f"截圖失敗：{exc}")
+                self._emit(
+                    WorkerState.ERROR,
+                    "worker.capture_fail",
+                    msg_kwargs={"exc": str(exc)},
+                )
                 self._wait(0.3)
                 continue
 
@@ -449,7 +455,7 @@ class AutoSkipWorker:
                 if confirm_click.awaiting_dismissal:
                     self._emit(
                         WorkerState.ERROR,
-                        "確認按鈕點擊後仍存在，已停止避免重複點擊",
+                        "worker.confirm_stuck",
                         window_title=window.title,
                         client_size=size_label,
                     )
@@ -460,16 +466,21 @@ class AutoSkipWorker:
                     else float(getattr(cfg, "skip_retry_cooldown", 2.0))
                 )
                 skip_cooldown_until = now + cooldown
-                self._emit(
-                    WorkerState.RUNNING,
-                    (
-                        "Skip 已消失（此段無需確認），回到偵測"
-                        if post_click.disappeared
-                        else f"Skip 點擊未驗證，暫停重試 {cooldown:.1f} 秒"
-                    ),
-                    window_title=window.title,
-                    client_size=size_label,
-                )
+                if post_click.disappeared:
+                    self._emit(
+                        WorkerState.RUNNING,
+                        "worker.skip_gone_no_confirm",
+                        window_title=window.title,
+                        client_size=size_label,
+                    )
+                else:
+                    self._emit(
+                        WorkerState.RUNNING,
+                        "worker.skip_unverified",
+                        msg_kwargs={"cooldown": cooldown},
+                        window_title=window.title,
+                        client_size=size_label,
+                    )
                 phase = "skip"
                 post_click.reset()
                 skip_consensus.reset()
@@ -481,7 +492,8 @@ class AutoSkipWorker:
                     remaining = max(0.0, skip_cooldown_until - now)
                     self._emit(
                         WorkerState.RUNNING,
-                        f"Skip 重試冷卻中… {remaining:.1f} 秒",
+                        "worker.skip_cooldown",
+                        msg_kwargs={"remaining": remaining},
                         window_title=window.title,
                         client_size=size_label,
                     )
@@ -517,7 +529,7 @@ class AutoSkipWorker:
                     )
                     self._emit(
                         WorkerState.RUNNING,
-                        "確認按鈕已消失，回到 Skip 偵測",
+                        "worker.confirm_gone",
                         window_title=window.title,
                         client_size=size_label,
                     )
@@ -532,7 +544,7 @@ class AutoSkipWorker:
                 ):
                     self._emit(
                         WorkerState.ERROR,
-                        "確認按鈕重試後仍存在，已停止避免重複點擊",
+                        "worker.confirm_retry_stuck",
                         window_title=window.title,
                         client_size=size_label,
                     )
@@ -590,51 +602,8 @@ class AutoSkipWorker:
                             return
                         if not clicker.is_foreground(window.hwnd):
                             continue
-                        fresh_window = refresh_window(window)
-                        if fresh_window is None:
-                            window = None
-                            continue
-                        try:
-                            capture = capturer.capture(
-                                fresh_window, force_refresh=True
-                            )
-                        except Exception as exc:
-                            self._emit(
-                                WorkerState.ERROR,
-                                f"點擊前重新截圖失敗：{exc}",
-                            )
-                            continue
-                        window = fresh_window
-                        frame = capture.frame
-                        size_label = f"{capture.width}×{capture.height}"
-                        match_frame, sx, sy = self._prepare_frame(frame, cfg)
-                        match = self._detect_match(match_frame, cfg, button)
-                        if not match.found:
-                            continue
 
-                if button == "confirm":
-                    fresh_window = refresh_window(window)
-                    if fresh_window is None:
-                        window = None
-                        continue
-                    try:
-                        capture = capturer.capture(
-                            fresh_window, force_refresh=True
-                        )
-                    except Exception as exc:
-                        self._emit(
-                            WorkerState.ERROR,
-                            f"確認前重新截圖失敗：{exc}",
-                        )
-                        continue
-                    window = fresh_window
-                    frame = capture.frame
-                    size_label = f"{capture.width}×{capture.height}"
-                    match_frame, sx, sy = self._prepare_frame(frame, cfg)
-                    match = self._detect_match(match_frame, cfg, button)
-                    if not match.found:
-                        continue
-
+                # Click with the current-frame match — no second capture/detect.
                 if not clicker.is_foreground(capture.hwnd):
                     continue
                 cap_x = match.center[0] * sx
@@ -660,7 +629,11 @@ class AutoSkipWorker:
                         method=getattr(cfg, "click_method", "cursor"),
                     )
                 except Exception as exc:
-                    self._emit(WorkerState.ERROR, f"點擊失敗：{exc}")
+                    self._emit(
+                        WorkerState.ERROR,
+                        "worker.click_fail",
+                        msg_kwargs={"exc": str(exc)},
+                    )
                     self._wait(cfg.scan_interval)
                     continue
 
@@ -669,7 +642,11 @@ class AutoSkipWorker:
                         self.status.skip_count += 1
                     self._emit(
                         WorkerState.CLICKED_SKIP,
-                        f"已點 Skip（{match.lang} · {match.score:.2f}）",
+                        "worker.clicked_skip",
+                        msg_kwargs={
+                            "lang": match.lang,
+                            "score": match.score,
+                        },
                         score=match.score,
                         button="skip",
                         lang=match.lang,
@@ -693,17 +670,23 @@ class AutoSkipWorker:
                     if first_attempt:
                         with self._lock:
                             self.status.confirm_count += 1
-                    attempt_label = (
-                        ""
-                        if first_attempt
-                        else f"（重試 {confirm_click.attempts}）"
-                    )
+                    if first_attempt:
+                        confirm_key = "worker.clicked_confirm"
+                        confirm_kwargs = {
+                            "lang": match.lang,
+                            "score": match.score,
+                        }
+                    else:
+                        confirm_key = "worker.clicked_confirm_retry"
+                        confirm_kwargs = {
+                            "attempt": confirm_click.attempts,
+                            "lang": match.lang,
+                            "score": match.score,
+                        }
                     self._emit(
                         WorkerState.CLICKED_CONFIRM,
-                        (
-                            f"已點確認{attempt_label}"
-                            f"（{match.lang} · {match.score:.2f}）"
-                        ),
+                        confirm_key,
+                        msg_kwargs=confirm_kwargs,
                         score=match.score,
                         button="confirm",
                         lang=match.lang,
@@ -716,39 +699,28 @@ class AutoSkipWorker:
             else:
                 # Idle detect: refresh preview often, text status less often
                 if want_preview or (now - last_status_at) >= status_interval:
-                    warn = ""
-                    if (
+                    size_mismatch = (
                         window.width != cfg.expected_width
                         or window.height != cfg.expected_height
-                    ):
-                        warn = (
-                            f" · 實際 {size_label} / 目標 "
-                            f"{cfg.resolution_label()}"
-                        )
+                    )
+                    common_kwargs: Dict[str, Any] = {
+                        "score": match.score,
+                        "fps": float(self.status.detect_fps),
+                        "size_mismatch": size_mismatch,
+                        "actual": size_label,
+                        "target": cfg.resolution_label(),
+                    }
                     if phase == "confirm":
-                        verify = (
-                            " · Skip 已消失"
-                            if post_click.disappeared
-                            else ""
-                        )
-                        msg = (
-                            f"等待確認… {match.score:.2f}{verify} · "
-                            f"{self.status.detect_fps:.0f} FPS{warn}"
-                        )
+                        msg_key = "worker.waiting_confirm"
+                        common_kwargs["skip_gone"] = post_click.disappeared
                     elif match.found:
-                        required = int(
+                        msg_key = "worker.skip_candidate"
+                        common_kwargs["count"] = consensus_count
+                        common_kwargs["required"] = int(
                             getattr(cfg, "skip_consensus_required", 2)
                         )
-                        msg = (
-                            f"Skip 候選 {consensus_count}/{required} · "
-                            f"{match.score:.2f} · "
-                            f"{self.status.detect_fps:.0f} FPS{warn}"
-                        )
                     else:
-                        msg = (
-                            f"偵測中… {match.score:.2f} · "
-                            f"{self.status.detect_fps:.0f} FPS{warn}"
-                        )
+                        msg_key = "worker.detecting_score"
                     state = (
                         WorkerState.WAITING_CONFIRM
                         if phase == "confirm"
@@ -756,7 +728,8 @@ class AutoSkipWorker:
                     )
                     self._emit(
                         state,
-                        msg,
+                        msg_key,
+                        msg_kwargs=common_kwargs,
                         score=match.score,
                         preview=annotated,
                         window_title=window.title,

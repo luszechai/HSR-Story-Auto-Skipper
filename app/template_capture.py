@@ -20,6 +20,7 @@ class TemplateCaptureDialog(ctk.CTkToplevel):
         master,
         keywords,
         on_saved: Optional[Callable[[], None]] = None,
+        default_lang: str = "zh_tw",
     ) -> None:
         super().__init__(master)
         self.title("擷取按鈕模板")
@@ -33,6 +34,7 @@ class TemplateCaptureDialog(ctk.CTkToplevel):
         self._scale = 1.0
         self._start = None
         self._rect_id = None
+        initial_lang = default_lang if default_lang in LANGS else "zh_tw"
 
         self.transient(master)
         self.grab_set()
@@ -50,7 +52,7 @@ class TemplateCaptureDialog(ctk.CTkToplevel):
         opts.pack(fill="x", padx=20, pady=8)
 
         self.button_var = ctk.StringVar(value="skip")
-        self.lang_var = ctk.StringVar(value="zh_tw")
+        self.lang_var = ctk.StringVar(value=initial_lang)
         self.name_var = ctk.StringVar(value="button")
 
         ctk.CTkLabel(opts, text="類型", text_color="#9aa3b5").grid(
@@ -59,17 +61,17 @@ class TemplateCaptureDialog(ctk.CTkToplevel):
         ctk.CTkOptionMenu(
             opts,
             variable=self.button_var,
-            values=["skip", "confirm"],
-            width=120,
+            values=["skip", "confirm", "confirm_text"],
+            width=140,
             fg_color="#1c2233",
             button_color="#2a3348",
             button_hover_color="#3a4660",
+            command=self._on_button_type_changed,
         ).grid(row=0, column=1, padx=6, pady=12)
 
-        ctk.CTkLabel(opts, text="語系", text_color="#9aa3b5").grid(
-            row=0, column=2, padx=(14, 6), pady=12
-        )
-        ctk.CTkOptionMenu(
+        self.lang_label = ctk.CTkLabel(opts, text="語系", text_color="#9aa3b5")
+        self.lang_label.grid(row=0, column=2, padx=(14, 6), pady=12)
+        self.lang_menu = ctk.CTkOptionMenu(
             opts,
             variable=self.lang_var,
             values=list(LANGS),
@@ -77,7 +79,9 @@ class TemplateCaptureDialog(ctk.CTkToplevel):
             fg_color="#1c2233",
             button_color="#2a3348",
             button_hover_color="#3a4660",
-        ).grid(row=0, column=3, padx=6, pady=12)
+        )
+        self.lang_menu.grid(row=0, column=3, padx=6, pady=12)
+        self._on_button_type_changed(self.button_var.get())
 
         ctk.CTkLabel(opts, text="檔名", text_color="#9aa3b5").grid(
             row=0, column=4, padx=(14, 6), pady=12
@@ -214,7 +218,12 @@ class TemplateCaptureDialog(ctk.CTkToplevel):
         lang = self.lang_var.get()
         name = self.name_var.get().strip() or "button"
         name = "".join(c for c in name if c.isalnum() or c in "-_")
-        out_dir = TEMPLATES_DIR / button / lang
+        # Skip icon is language-independent; confirm / confirm_text use lang folders.
+        out_dir = (
+            TEMPLATES_DIR / button
+            if button == "skip"
+            else TEMPLATES_DIR / button / lang
+        )
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"{name}.png"
         # Avoid overwrite
@@ -237,3 +246,19 @@ class TemplateCaptureDialog(ctk.CTkToplevel):
         )
         if self.on_saved:
             self.on_saved()
+
+    def _on_button_type_changed(self, button: str) -> None:
+        """Skip templates are shared; Confirm / Confirm-text need a language."""
+        if button == "skip":
+            self.lang_menu.configure(state="disabled")
+            self.lang_label.configure(text_color="#4a5160")
+        else:
+            self.lang_menu.configure(state="normal")
+            self.lang_label.configure(text_color="#9aa3b5")
+        if button == "confirm_text" and self.name_var.get().strip() in (
+            "",
+            "button",
+        ):
+            self.name_var.set("confirm_text")
+        elif button != "confirm_text" and self.name_var.get().strip() == "confirm_text":
+            self.name_var.set("button")

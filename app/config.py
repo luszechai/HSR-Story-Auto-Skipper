@@ -41,20 +41,24 @@ ROOT = app_root()
 CONFIG_PATH = ROOT / "config.json"
 TEMPLATES_DIR = ROOT / "assets" / "templates"
 
-LANGS = ("zh_tw", "zh_cn", "en", "jp")
+LANGS = ("zh_tw", "zh_cn", "jp", "en")
+DEFAULT_UI_LANG = "zh_tw"
+DEFAULT_GAME_LANG = "zh_tw"
 WINDOW_TITLE_KEYWORDS = (
     "崩壞：星穹鐵道",
     "崩坏：星穹铁道",
+    "崩壊：スターレイル",
+    "スターレイル",
     "Honkai: Star Rail",
     "Honkai Star Rail",
 )
 
-# Common windowed presets: (label, width, height)
-RESOLUTION_PRESETS: Tuple[Tuple[str, int, int], ...] = (
-    ("1600 × 900（推薦）", 1600, 900),
-    ("1920 × 1080", 1920, 1080),
-    ("1280 × 720", 1280, 720),
-    ("1366 × 768", 1366, 768),
+# Common windowed presets: (base_label, width, height, recommended)
+RESOLUTION_PRESETS: Tuple[Tuple[str, int, int, bool], ...] = (
+    ("1600 × 900", 1600, 900, True),
+    ("1920 × 1080", 1920, 1080, False),
+    ("1280 × 720", 1280, 720, False),
+    ("1366 × 768", 1366, 768, False),
 )
 
 CLICK_METHODS = ("cursor",)
@@ -68,7 +72,10 @@ class AppConfig:
     confirm_grace: float = 3.0
     # After Skip is detected, wait before clicking
     skip_click_delay: float = 0.3
-    enabled_langs: List[str] = field(default_factory=lambda: list(LANGS))
+    # App interface language (labels / settings UI)
+    ui_lang: str = DEFAULT_UI_LANG
+    # Game template / detection language (confirm + confirm_text folders)
+    game_lang: str = DEFAULT_GAME_LANG
     hotkey_start: str = "f6"
     hotkey_stop: str = "f7"
     window_keywords: List[str] = field(
@@ -129,6 +136,8 @@ class AppConfig:
             return cls()
         if not isinstance(data, dict):
             return cls()
+        # Legacy multi-select list → single game_lang (first valid entry).
+        legacy_enabled = data.get("enabled_langs")
         known = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
         filtered = {k: v for k, v in data.items() if k in known}
         try:
@@ -199,16 +208,38 @@ class AppConfig:
         ):
             if not isinstance(getattr(cfg, field_name), bool):
                 setattr(cfg, field_name, getattr(defaults, field_name))
-        enabled_langs = cfg.enabled_langs if isinstance(cfg.enabled_langs, list) else []
-        cfg.enabled_langs = [
-            lang for lang in enabled_langs if isinstance(lang, str) and lang in LANGS
-        ] or list(LANGS)
+        # Prefer explicit game_lang; otherwise migrate first valid enabled_langs entry.
+        saved_game = data.get("game_lang")
+        if isinstance(saved_game, str) and saved_game in LANGS:
+            cfg.game_lang = saved_game
+        else:
+            migrated = None
+            if isinstance(legacy_enabled, list):
+                for lang in legacy_enabled:
+                    if isinstance(lang, str) and lang in LANGS:
+                        migrated = lang
+                        break
+            cfg.game_lang = migrated or DEFAULT_GAME_LANG
+        saved_ui = data.get("ui_lang")
+        if isinstance(saved_ui, str) and saved_ui in LANGS:
+            cfg.ui_lang = saved_ui
+        else:
+            cfg.ui_lang = DEFAULT_UI_LANG
         window_keywords = (
             cfg.window_keywords if isinstance(cfg.window_keywords, list) else []
         )
-        cfg.window_keywords = [
+        cleaned = [
             keyword
             for keyword in window_keywords
             if isinstance(keyword, str) and keyword.strip()
-        ] or list(WINDOW_TITLE_KEYWORDS)
+        ]
+        # Keep user keywords, but always ensure built-in titles are present so
+        # language switches (e.g. Japanese 崩壊：スターレイル) keep working.
+        merged = list(cleaned)
+        known = {keyword.casefold() for keyword in merged}
+        for keyword in WINDOW_TITLE_KEYWORDS:
+            if keyword.casefold() not in known:
+                merged.append(keyword)
+                known.add(keyword.casefold())
+        cfg.window_keywords = merged or list(WINDOW_TITLE_KEYWORDS)
         return cfg

@@ -13,6 +13,12 @@ Windows-only visual automation tool that detects and clicks the **Skip** and
 > Automated input may violate the game's terms of service. Use this project
 > only at your own risk. This project is not affiliated with HoYoverse.
 
+### Demo / 示範
+
+https://github.com/luszechai/HSR-Story-Auto-Skipper/raw/main/assets/demo/hsr-auto-skip-demo.mp4
+
+[Download demo video / 下載示範影片](assets/demo/hsr-auto-skip-demo.mp4)
+
 ---
 
 ## 繁體中文
@@ -20,10 +26,11 @@ Windows-only visual automation tool that detects and clicks the **Skip** and
 ### 功能
 
 - 只擷取遊戲視窗客戶區，不掃描整個螢幕
-- OpenCV 多尺度模板比對，支援繁中、簡中、英文與日文
+- OpenCV 多尺度模板比對；Skip 圖示不分語言，確認按鈕依「遊戲語言」載入繁中／簡中／日文／英文模板
+- 設定可分別選擇介面語言（UI）與遊戲語言（偵測模板）；各為單一語系下拉選單
 - 使用筆劃輪廓遮罩，降低動態場景背景對 Skip 分數的干擾
 - Skip 固定區域存在檢查與 2/3 多幀穩定確認
-- 點擊前重新擷取並驗證，避免視窗移動或失去焦點後誤點
+- Skip／確認偵測到後立即點擊（不做第二次截圖驗證）
 - 點擊後確認 Skip／確認按鈕消失，失敗時限制重試次數
 - 「確認」文字二次驗證，缺少文字模板時採安全拒絕
 - 即時預覽、浮動 Overlay、全域開始／停止熱鍵
@@ -44,16 +51,17 @@ Windows-only visual automation tool that detects and clicks the **Skip** and
 1. 以視窗模式開啟遊戲，且不要最小化。
 2. 啟動本程式，確認已找到正確遊戲視窗。
 3. 在設定中選擇遊戲客戶區解析度；預設模板以 1600×900 校準。
-4. 按「開始偵測」或使用設定的開始熱鍵。
-5. 若內建模板不適合目前語言或 UI 比例，再使用「擷取模板」建立模板。
+4. 在設定中分別選擇「語言」（介面）與「遊戲語言」（確認／確認文字模板）。
+5. 按「開始偵測」或使用設定的開始熱鍵。
+6. 若內建模板不適合目前語言或 UI 比例，再使用「擷取模板」建立模板。
 
 > 遊戲必須保持前景且不可被其他視窗遮住。`mss` 擷取的是螢幕上實際可見
 > 像素，遮住遊戲會導致分數下降或偵測失敗。
 
 ### 疑難排解
 
-- **找不到視窗：**確認視窗標題含「崩壞：星穹鐵道」或
-  `Honkai: Star Rail`。
+- **找不到視窗：**確認視窗標題含「崩壞：星穹鐵道」、
+  「崩壊：スターレイル」或 `Honkai: Star Rail`。
 - **Skip 分數不足：**確認解析度／UI 比例、保持遊戲前景、重新擷取同一語言
   的模板；不要先任意降低門檻。
 - **誤點擊：**提高門檻，並保持 Skip 存在檢查與確認文字檢查啟用。
@@ -90,11 +98,12 @@ Python 3.10 Windows 建置環境。產物位於 `dist\HSR Auto Skip\`。
 ### Features
 
 - Captures only the game client area instead of scanning the entire desktop
-- OpenCV multi-scale template matching for Traditional Chinese, Simplified
-  Chinese, English, and Japanese
+- OpenCV multi-scale template matching; Skip is language-independent, while
+  Confirm templates load for a single selected game language (zh_tw / zh_cn / jp / en)
+- Separate Settings dropdowns for UI language and game (detection) language
 - Stroke-refined masks reduce interference from animated backgrounds
 - Fixed-region Skip presence check with 2-of-3-frame spatial consensus
-- Re-captures and validates before clicking to prevent stale or off-window clicks
+- Clicks Skip/Confirm immediately when detected (no second capture/detect)
 - Verifies that Skip/Confirm disappears and limits failed click retries
 - Secondary Confirm-text validation that fails closed when its template is missing
 - Live preview, floating overlay, and global start/stop hotkeys
@@ -116,8 +125,9 @@ Requirements: Windows 10/11 and Honkai: Star Rail in windowed mode.
 2. Launch the tool and verify that it finds the correct game window.
 3. Select the game client resolution in Settings. The bundled Skip template is
    calibrated for 1600×900 by default.
-4. Select **Start Detection** or press the configured start hotkey.
-5. Use **Capture Template** only when the bundled template does not match your
+4. Choose **UI language** and **Game language** separately in Settings.
+5. Select **Start Detection** or press the configured start hotkey.
+6. Use **Capture Template** only when the bundled template does not match your
    language or UI scale.
 
 > The game must remain visible and in the foreground. `mss` captures the pixels
@@ -126,8 +136,8 @@ Requirements: Windows 10/11 and Honkai: Star Rail in windowed mode.
 
 ### Troubleshooting
 
-- **Window not found:** ensure the title contains `Honkai: Star Rail` or one of
-  the supported Chinese titles.
+- **Window not found:** ensure the title contains `Honkai: Star Rail`,
+  `崩壊：スターレイル`, or one of the supported Chinese titles.
 - **Low Skip score:** check resolution/UI scale, keep the game visible, and
   capture a matching-language template before lowering the threshold.
 - **False click:** raise the threshold and keep Skip-presence and Confirm-text
@@ -165,21 +175,23 @@ Build output is written to `dist\HSR Auto Skip\`.
 
 ```text
 assets/templates/
-  skip/{zh_tw,zh_cn,en,jp}/*.png
-  confirm/{zh_tw,zh_cn,en,jp}/*.png
-  confirm_text/*.png
+  skip/*.png                              # language-independent |>| icon
+  confirm/{zh_tw,zh_cn,en,jp}/*.png       # Confirm button
+  confirm_text/{zh_tw,zh_cn,en,jp}/*.png  # Confirm label text per language
 ```
 
 Capture templates at the resolution normally used for play and keep the same
-client resolution when possible. Skip templates may use a matching
-`<name>_mask.png` sidecar.
+client resolution when possible. Skip is shared across languages; Confirm button
+and Confirm-text glyphs are per language (`zh_tw` / `zh_cn` / `en` / `jp`).
+Skip templates may use a matching `<name>_mask.png` sidecar.
 
 ## Development / 開發
 
 ```text
 main.py              Application entry point / 程式進入點
 app/                 UI, worker, detector, capture and click logic
-assets/              Templates and branding / 模板與品牌資源
+assets/              Templates, branding, and demo video / 模板、品牌與示範影片
+assets/demo/         README demo recording / README 示範錄影
 build_app.bat         Reproducible PyInstaller build
 ```
 
