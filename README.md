@@ -15,11 +15,11 @@ Windows-only visual automation tool that detects and clicks the **Skip** and
 
 ### Demo / 示範
 
-https://github.com/luszechai/HSR-Story-Auto-Skipper/releases/download/demo-assets/hsr-auto-skip-demo-embed.mp4
+![HSR Auto Skip demo](assets/demo/hsr-auto-skip-demo.gif)
 
-<video src="https://github.com/luszechai/HSR-Story-Auto-Skipper/releases/download/demo-assets/hsr-auto-skip-demo-embed.mp4" controls muted playsinline width="720"></video>
-
-[Download demo video / 下載示範影片](assets/demo/hsr-auto-skip-demo.mp4)
+[Full MP4 with audio / 完整有聲 MP4](https://github.com/luszechai/HSR-Story-Auto-Skipper/releases/download/demo-assets/hsr-auto-skip-demo-embed.mp4)
+·
+[Repo copy / 倉庫檔案](assets/demo/hsr-auto-skip-demo.mp4)
 
 ---
 
