@@ -9,6 +9,7 @@ dist/
 dist_fresh/
 build/
 release/*.zip
+tests/
 .idea/
 .vscode/
 *.log

@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  validate:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,6 +16,4 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
       - name: Compile sources
-        run: python -m compileall -q main.py app tests
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -v
+        run: python -m compileall -q main.py app

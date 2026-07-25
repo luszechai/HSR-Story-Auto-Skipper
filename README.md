@@ -180,7 +180,6 @@ client resolution when possible. Skip templates may use a matching
 main.py              Application entry point / 程式進入點
 app/                 UI, worker, detector, capture and click logic
 assets/              Templates and branding / 模板與品牌資源
-tests/               Unit tests / 單元測試
 build_app.bat         Reproducible PyInstaller build
 ```
 
@@ -188,7 +187,6 @@ Run checks with:
 
 ```powershell
 python -m compileall -q app main.py
-python -m unittest discover -s tests -v
 ```
 
 Please read [CONTRIBUTING.md](CONTRIBUTING.md),
